@@ -1,0 +1,107 @@
+# FriendSplit
+
+Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen Ausflug, Abend oder ein Event erfasst und fair abrechnet – gedacht zur Einbindung in eine bestehende Webseite bei **ALL-INKL.COM** (oder jedem anderen Webhosting mit PHP und MySQL).
+
+- Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen
+- Ausgaben mit Betrag, Beschreibung, Kategorie (🍹 🍕 🎟️ 🚕 🏨 🛍️), zahlender Person, Beteiligten, Datum und Notiz
+- Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
+- Zahlungen als erledigt markieren (und zurücknehmen), Verlauf aller Änderungen
+- Alle Daten zentral in MySQL; Änderungen anderer erscheinen automatisch (Aktualisierung alle 15 s und beim Zurückkehren in den Tab)
+
+## Technik – warum so?
+
+ALL-INKL bietet klassisches Shared Hosting: Apache, PHP 8, MySQL/MariaDB, Upload per FTP, Verwaltung im KAS und per phpMyAdmin – aber kein Node.js. Deshalb:
+
+| Teil | Umsetzung |
+|---|---|
+| Backend | PHP ≥ 8.1, PDO mit vorbereiteten Statements, keine Abhängigkeiten (kein Composer nötig) |
+| Datenbank | MySQL/MariaDB (`utf8mb4`, InnoDB); SQLite für lokale Entwicklung und Tests |
+| Frontend | HTML, CSS und reines JavaScript als ES-Module – kein Build-Schritt, einfach hochladen |
+| Schriften | Systemschriften, keine externen Ressourcen (kein Google-Fonts-Thema für den Datenschutz) |
+
+```
+public/                  ← dieser Ordner kommt auf den Webspace
+├── index.html
+├── assets/              app.js, app.css, icon.svg
+├── api/
+│   ├── index.php        JSON-API (einziger öffentlicher PHP-Einstieg)
+│   ├── config.sample.php
+│   ├── lib/             Split.php (Berechnung), Store.php (Datenbank/Regeln), …  – per .htaccess gesperrt
+│   └── schema/          mysql.sql, sqlite.sql                                   – per .htaccess gesperrt
+└── data/                nur für SQLite in der Entwicklung                         – per .htaccess gesperrt
+tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end)
+```
+
+## Installation bei ALL-INKL.COM
+
+1. **Datenbank anlegen:** KAS → *Datenbanken* → *Neue Datenbank*. Datenbankname, Benutzer und Passwort notieren (z. B. `d0123456`).
+2. **Dateien hochladen:** Den Inhalt von `public/` per FTP in einen Unterordner deiner Webseite laden, z. B. `/friendsplit/`.
+3. **Konfiguration:** `api/config.sample.php` nach `api/config.php` kopieren und Zugangsdaten eintragen:
+   ```php
+   'dsn'      => 'mysql:host=localhost;dbname=d0123456;charset=utf8mb4',
+   'user'     => 'd0123456',
+   'password' => '…',
+   ```
+4. **Tabellen anlegen** – eine der beiden Varianten:
+   - phpMyAdmin öffnen (KAS → Datenbanken → phpMyAdmin), Datenbank wählen, *Importieren* → `api/schema/mysql.sql`.
+   - Oder in `config.php` einen langen Zufallswert als `setup_key` eintragen und einmal  
+     `https://deine-domain.de/friendsplit/api/index.php?action=setup&key=DEIN_SETUP_KEY` aufrufen. Danach `setup_key` wieder leeren.
+5. **HTTPS:** Im KAS ein (kostenloses Let's-Encrypt-)Zertifikat für die Domain aktivieren. Kopieren und Teilen von Links funktionieren im Browser nur über HTTPS zuverlässig.
+6. **Einbinden:** Auf der bestehenden Webseite einen Link auf `/friendsplit/` setzen. Alle Pfade sind relativ, der Ordnername ist frei wählbar.
+
+Alle Tabellen haben das Präfix `fs_`, damit sie neben bestehenden Tabellen in derselben Datenbank liegen können.
+
+## Lokale Entwicklung und Tests
+
+```bash
+cp public/api/config.sample.php public/api/config.php
+# in config.php die SQLite-Zeile aktivieren und 'auto_migrate' => true setzen
+php -S localhost:8000 -t public
+# → http://localhost:8000
+
+php tests/SplitTest.php   # Rechenlogik inkl. Beispiel aus dem Konzept und Zufallstests
+php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
+```
+
+## Berechnungsregeln
+
+- **Aufteilung:** Jede Ausgabe wird gleichmäßig auf die ausgewählten Beteiligten verteilt; nicht Beteiligte erhalten keinen Anteil.
+- **Rundung:** Jede Person bekommt `floor(Betrag / Anzahl)` Cent. Die übrigen Rest-Cents (höchstens Anzahl − 1) werden einzeln vergeben – **zuerst an die zahlende Person, sofern sie beteiligt ist, danach in der Reihenfolge der Teilnehmendenliste**. Die Summe der Anteile ist dadurch immer exakt der Rechnungsbetrag. Beispiel: 10,00 € auf Alex, Mathis, Sam, bezahlt von Sam → Sam 3,34 €, Alex 3,33 €, Mathis 3,33 €.
+- **Saldo** = selbst bezahlt − eigener Anteil + geleistete Ausgleichszahlungen − erhaltene Ausgleichszahlungen.
+- **Ausgleichsplan:** Die Person mit der größten Schuld zahlt an die Person mit dem größten Guthaben, bis alles ausgeglichen ist – höchstens *n − 1* Zahlungen. Vorschläge verändern keine Ausgaben.
+- Beträge werden ausschließlich als ganze Cent (`INT`) gespeichert und berechnet. Die Anteile werden pro Ausgabe gespeichert (`fs_expense_shares`), damit später auch ungleiche Aufteilungen möglich sind.
+
+## Zugriff, Berechtigungen und Datenschutz
+
+- **Event-Zugang:** Jedes Event hat einen zufälligen Zugangscode aus 12 Zeichen (≈ 60 Bit, ohne verwechselbare Zeichen wie 0/O, 1/I), z. B. `K7Q2-MX9P-4HTR`. Er steht nur im `#`-Teil des Links und landet dadurch nicht in Server-Logs oder Referrern. Jeder Datenbankzugriff ist auf das Event dieses Codes beschränkt.
+- **Personen:** Die Namensauswahl ist **keine sichere Anmeldung**, darauf weist die App sichtbar hin. Ein Gerät merkt sich lokal, wer man ist.
+- **Produktentscheidung für Version 1:** Alle mit dem Link dürfen alle Ausgaben anlegen, ändern und löschen. Ohne echte Anmeldung ließe sich eine Beschränkung auf „eigene“ Ausgaben ohnehin umgehen. Stattdessen gibt es Transparenz: Jede Ausgabe zeigt, wer sie eingetragen und zuletzt geändert hat, und der **Verlauf** protokolliert jede Änderung. Löschungen müssen bestätigt werden.
+- Gespeichert werden nur Anzeigenamen – keine E-Mail-Adressen, Telefonnummern oder Konten.
+
+## Zuverlässigkeit
+
+- **Speichern:** Die App meldet Erfolg erst nach der Bestätigung durch den Server. Bei Fehlern bleibt das Formular ausgefüllt, es erscheint eine verständliche Meldung und die Möglichkeit, erneut zu speichern.
+- **Doppelte Einträge:** Jedes geöffnete Formular hat ein Einmal-Token. Ein wiederholtes Absenden (z. B. nach einem Verbindungsabbruch) legt die Ausgabe nicht doppelt an. Zusätzlich warnt die App, wenn eine sehr ähnliche Ausgabe schon existiert.
+- **Gleichzeitige Änderungen:** Ausgaben haben eine Versionsnummer (optimistisches Sperren). Wer eine inzwischen geänderte Ausgabe speichern oder löschen will, sieht den aktuellen Stand und entscheidet: „Aktuelle Version laden“ oder „Meine Version trotzdem speichern“. Schreibvorgänge laufen pro Event in einer Transaktion nacheinander ab.
+- **Validierung** auf Server und Client: Betrag > 0,00 € (max. 100.000 €), mindestens eine beteiligte Person, zahlende Person muss teilnehmen, gültiges Datum, Längenbegrenzungen.
+- Personen, die an Ausgaben oder Zahlungen beteiligt sind, können nicht entfernt werden, damit keine Abrechnung kaputtgeht.
+
+## API (Kurzüberblick)
+
+`api/index.php?action=…`, JSON. Event-Zugriff über den Header `X-Event-Code`, die aktuelle Person über `X-Person-Id`.
+
+| Aktion | Methode | Zweck |
+|---|---|---|
+| `create_event` | POST | Event mit Teilnehmenden anlegen → `code`, `person_id` |
+| `event` | GET | Gesamtzustand: Event, Teilnehmende, Ausgaben mit Anteilen, Zahlungen, Salden, Plan, Verlauf |
+| `update_event` | POST | Name, Datum, Ort, Notiz ändern |
+| `add_participant` / `rename_participant` / `remove_participant` | POST | Teilnehmende verwalten |
+| `save_expense` | POST | Ausgabe anlegen (`client_token`) oder ändern (`id` + `version`) |
+| `delete_expense` | POST | Ausgabe löschen (`id` + `version`) |
+| `add_settlement` / `delete_settlement` | POST | Ausgleichszahlung als erledigt markieren bzw. zurücknehmen |
+
+Jede Änderung antwortet mit dem neuen Gesamtzustand. Fehler kommen als `{ ok: false, error: { code, message, fields? } }` mit passendem HTTP-Status (404, 409, 422, …).
+
+## Mögliche Erweiterungen
+
+Individuelle bzw. ungleiche Anteile (das Datenmodell ist vorbereitet), Export als CSV/PDF, mehrere Währungen, Belegfotos, persönliche PINs oder echte Benutzerkonten (`fs_persons.auth_user_id` ist vorgesehen), Echtzeit-Updates per Server-Sent Events.
