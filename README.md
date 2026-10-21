@@ -104,4 +104,6 @@ Jede Änderung antwortet mit dem neuen Gesamtzustand. Fehler kommen als `{ ok: f
 
 ## Mögliche Erweiterungen
 
+Benutzerkonten mit Login, Admin-Bereich und serverseitig gespeicherter Liste „Meine Projekte“: siehe [Konzept](docs/KONZEPT-Konten-und-Login.md).
+
 Individuelle bzw. ungleiche Anteile (das Datenmodell ist vorbereitet), Export als CSV/PDF, mehrere Währungen, Belegfotos, persönliche PINs oder echte Benutzerkonten (`fs_persons.auth_user_id` ist vorgesehen), Echtzeit-Updates per Server-Sent Events.
