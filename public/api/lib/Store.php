@@ -3,7 +3,8 @@ declare(strict_types=1);
 
 /**
  * Geschäftslogik und Datenbankzugriffe. Jeder Zugriff ist auf genau ein Event beschränkt,
- * das über seinen geheimen Zugangscode ermittelt wurde.
+ * das über seinen geheimen Zugangscode ermittelt wurde. Angemeldete Konten sind über
+ * fs_event_participants.user_id mit „ihrer“ Person im Event verknüpft.
  */
 final class Store
 {
@@ -43,9 +44,10 @@ final class Store
 
     /**
      * @param array<string,mixed> $in
+     * @param array<string,mixed>|null $user angemeldetes Konto: wird Owner und mit der eigenen Person verknüpft
      * @return array{code:string,person_id:string}
      */
-    public function createEvent(array $in): array
+    public function createEvent(array $in, ?array $user = null): array
     {
         $errors = [];
         $name = $this->text($in, 'name', 120, true, $errors, 'Bitte gib einen Eventnamen ein.');
@@ -88,10 +90,11 @@ final class Store
             $code = $this->insertEventWithUniqueCode($eventId, $name, $date, $location, $notes, $now);
             $creatorId = null;
             foreach ($names as $position => $personName) {
-                $personId = $this->insertParticipant($eventId, $personName, $position === 0 ? 'organizer' : 'member', $position, $now);
+                $isCreator = $position === 0;
+                $personId = $this->insertParticipant($eventId, $personName, $isCreator ? 'organizer' : 'member', $position, $now, $isCreator ? $user['id'] ?? null : null);
                 $creatorId ??= $personId;
             }
-            $this->db->prepare('UPDATE fs_events SET created_by_person_id = ? WHERE id = ?')->execute([$creatorId, $eventId]);
+            $this->db->prepare('UPDATE fs_events SET created_by_person_id = ?, owner_user_id = ? WHERE id = ?')->execute([$creatorId, $user['id'] ?? null, $eventId]);
             $this->log($eventId, $creatorId, 'event_created', sprintf('%s hat das Event „%s“ erstellt', $creator, $name));
             $this->db->commit();
         } catch (Throwable $e) {
@@ -117,13 +120,239 @@ final class Store
         return $event;
     }
 
-    /** Gibt die Personen-ID zurück, wenn sie zum Event gehört – sonst null. */
-    public function actor(array $event, ?string $personId): ?string
+    /** @return array<string,mixed> */
+    public function requireEventById(string $id): array
     {
+        $stmt = $this->db->prepare('SELECT * FROM fs_events WHERE id = ?');
+        $stmt->execute([$id]);
+        $event = $stmt->fetch();
+        if (!$event) {
+            throw new ApiError(404, 'event_not_found', 'Dieses Event gibt es nicht mehr.');
+        }
+        return $event;
+    }
+
+    /**
+     * Wer handelt? Angemeldet: die mit dem Konto verknüpfte Person. Ohne Anmeldung: die gewählte
+     * Person (X-Person-Id), aber nur, wenn sie zum Event gehört und mit keinem Konto verknüpft ist.
+     * @param array<string,mixed>|null $user
+     */
+    public function actor(array $event, ?array $user, ?string $personId): ?string
+    {
+        if ($user !== null) {
+            return $this->linkedPerson($event['id'], $user['id']);
+        }
         if ($personId === null) {
             return null;
         }
-        return $this->participantName($event['id'], $personId) !== null ? $personId : null;
+        $stmt = $this->db->prepare('SELECT user_id FROM fs_event_participants WHERE event_id = ? AND person_id = ?');
+        $stmt->execute([$event['id'], $personId]);
+        $row = $stmt->fetch();
+        return $row && $row['user_id'] === null ? $personId : null;
+    }
+
+    /** Owner des Events oder Admin. */
+    public function canManage(array $event, ?array $user): bool
+    {
+        return $user !== null && ($user['role'] === 'admin' || ($event['owner_user_id'] ?? null) === $user['id']);
+    }
+
+    // ------------------------------------------------------------------ Konten und Events
+
+    /**
+     * „Meine Events“ eines Kontos: alle Events, in denen das Konto mit einer Person verknüpft ist.
+     * @return array<int,array<string,mixed>>
+     */
+    public function myEvents(string $userId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT e.access_code, e.name, e.event_date, e.location, e.updated_at, e.owner_user_id, p.display_name AS person_name,
+               (SELECT COUNT(*) FROM fs_event_participants c WHERE c.event_id = e.id) AS participants
+             FROM fs_event_participants ep
+             JOIN fs_events e ON e.id = ep.event_id
+             JOIN fs_persons p ON p.id = ep.person_id
+             WHERE ep.user_id = ?
+             ORDER BY e.updated_at DESC'
+        );
+        $stmt->execute([$userId]);
+        return array_map(fn ($r) => [
+            'code' => $r['access_code'],
+            'name' => $r['name'],
+            'date' => $r['event_date'] !== null ? substr((string) $r['event_date'], 0, 10) : null,
+            'location' => $r['location'],
+            'updated_at' => $this->isoUtc($r['updated_at']),
+            'person_name' => $r['person_name'],
+            'participants' => (int) $r['participants'],
+            'is_owner' => $r['owner_user_id'] === $userId,
+        ], $stmt->fetchAll());
+    }
+
+    /** Alle Events für den Admin-Bereich. */
+    public function allEvents(): array
+    {
+        $rows = $this->db->query(
+            'SELECT e.access_code, e.name, e.event_date, e.updated_at, u.display_name AS owner,
+               (SELECT COUNT(*) FROM fs_event_participants c WHERE c.event_id = e.id) AS participants,
+               (SELECT COUNT(*) FROM fs_event_participants c WHERE c.event_id = e.id AND c.user_id IS NOT NULL) AS linked,
+               (SELECT COALESCE(SUM(x.amount_cents), 0) FROM fs_expenses x WHERE x.event_id = e.id) AS total_cents
+             FROM fs_events e LEFT JOIN fs_users u ON u.id = e.owner_user_id
+             ORDER BY e.updated_at DESC LIMIT 500'
+        )->fetchAll();
+        return array_map(fn ($r) => [
+            'code' => $r['access_code'],
+            'name' => $r['name'],
+            'date' => $r['event_date'] !== null ? substr((string) $r['event_date'], 0, 10) : null,
+            'owner' => $r['owner'],
+            'participants' => (int) $r['participants'],
+            'linked' => (int) $r['linked'],
+            'total_cents' => (int) $r['total_cents'],
+            'updated_at' => $this->isoUtc($r['updated_at']),
+        ], $rows);
+    }
+
+    /**
+     * Übernimmt Events, die auf einem Gerät ohne Anmeldung genutzt wurden, ins Konto.
+     * Erwartet [{code, person_id}]; verknüpft die Person nur, wenn sie noch frei ist.
+     * @param array<string,mixed> $in
+     * @param array<string,mixed> $user
+     */
+    public function importLocal(array $in, array $user): array
+    {
+        $items = is_array($in['items'] ?? null) ? array_slice($in['items'], 0, 50) : [];
+        $imported = 0;
+        foreach ($items as $item) {
+            $code = self::normalizeCode(is_string($item['code'] ?? null) ? $item['code'] : null);
+            $personId = is_string($item['person_id'] ?? null) ? $item['person_id'] : null;
+            if ($code === null || $personId === null) {
+                continue;
+            }
+            $stmt = $this->db->prepare('SELECT * FROM fs_events WHERE access_code = ?');
+            $stmt->execute([$code]);
+            $event = $stmt->fetch();
+            if (!$event || $this->linkedPerson($event['id'], $user['id']) !== null) {
+                continue;
+            }
+            try {
+                $this->joinEvent($event, ['person_id' => $personId], $user);
+                $imported++;
+            } catch (ApiError) {
+                // Person gehört inzwischen jemand anderem oder wurde entfernt – überspringen.
+            }
+        }
+        return ['imported' => $imported];
+    }
+
+    /**
+     * Konto mit einer Person im Event verknüpfen: vorhandene freie Person ({person_id}) oder neue
+     * Person ({name}). Eine bestehende Verknüpfung im selben Event wird dabei umgehängt.
+     * @param array<string,mixed> $in
+     * @param array<string,mixed> $user
+     */
+    public function joinEvent(array $event, array $in, array $user): string
+    {
+        $personId = is_string($in['person_id'] ?? null) ? $in['person_id'] : null;
+        $errors = [];
+        $name = $personId === null ? $this->text($in, 'name', 60, true, $errors, 'Bitte gib deinen Namen ein.') : null;
+        if ($errors) {
+            throw ApiError::validation($errors);
+        }
+        return $this->transaction($event, function () use ($event, $personId, $name, $user) {
+            if ($personId === null) {
+                $participants = $this->participants($event['id']);
+                if (count($participants) >= self::MAX_PARTICIPANTS) {
+                    throw ApiError::validation(['name' => 'Ein Event kann höchstens ' . self::MAX_PARTICIPANTS . ' Teilnehmende haben.']);
+                }
+                $this->assertUniqueName($participants, $name, null);
+                $this->db->prepare('UPDATE fs_event_participants SET user_id = NULL WHERE event_id = ? AND user_id = ?')->execute([$event['id'], $user['id']]);
+                $position = $participants ? max(array_column($participants, 'position')) + 1 : 0;
+                $personId = $this->insertParticipant($event['id'], $name, 'member', $position, Db::now(), $user['id']);
+                $this->log($event['id'], $personId, 'participant_joined', sprintf('%s ist dem Event beigetreten', $name));
+                return $personId;
+            }
+
+            $stmt = $this->db->prepare('SELECT ep.user_id, ep.role, p.display_name FROM fs_event_participants ep JOIN fs_persons p ON p.id = ep.person_id WHERE ep.event_id = ? AND ep.person_id = ?');
+            $stmt->execute([$event['id'], $personId]);
+            $row = $stmt->fetch();
+            if (!$row) {
+                throw new ApiError(404, 'person_not_found', 'Diese Person nimmt nicht (mehr) am Event teil.');
+            }
+            if ($row['user_id'] === $user['id']) {
+                return $personId;
+            }
+            if ($row['user_id'] !== null) {
+                throw new ApiError(409, 'person_taken', sprintf('%s ist bereits mit einem anderen Konto verknüpft.', $row['display_name']));
+            }
+            $this->db->prepare('UPDATE fs_event_participants SET user_id = NULL WHERE event_id = ? AND user_id = ?')->execute([$event['id'], $user['id']]);
+            $this->db->prepare('UPDATE fs_event_participants SET user_id = ? WHERE event_id = ? AND person_id = ?')->execute([$user['id'], $event['id'], $personId]);
+            // Wer die Organisator-Person eines Events ohne Owner übernimmt, wird Owner.
+            if ($row['role'] === 'organizer') {
+                $this->db->prepare('UPDATE fs_events SET owner_user_id = ? WHERE id = ? AND owner_user_id IS NULL')->execute([$user['id'], $event['id']]);
+            }
+            $this->log($event['id'], $personId, 'participant_linked', sprintf('%s ist jetzt mit einem Konto angemeldet', $row['display_name']));
+            return $personId;
+        });
+    }
+
+    /** Eigene Verknüpfung lösen: Das Event verschwindet aus „Meine Events“, die Person bleibt. */
+    public function leaveEvent(array $event, array $user): void
+    {
+        $this->transaction($event, function () use ($event, $user) {
+            $this->db->prepare('UPDATE fs_event_participants SET user_id = NULL WHERE event_id = ? AND user_id = ?')->execute([$event['id'], $user['id']]);
+        });
+    }
+
+    /** Owner/Admin: Konto-Verknüpfung einer Person lösen (z. B. falsch gewählter Name). */
+    public function unlinkParticipant(array $event, array $in, ?array $user, ?string $actor): void
+    {
+        $this->requireManage($event, $user);
+        $personId = is_string($in['person_id'] ?? null) ? $in['person_id'] : '';
+        $this->transaction($event, function () use ($event, $personId, $actor) {
+            $name = $this->participantName($event['id'], $personId);
+            if ($name === null) {
+                throw new ApiError(404, 'person_not_found', 'Diese Person nimmt nicht (mehr) am Event teil.');
+            }
+            $this->db->prepare('UPDATE fs_event_participants SET user_id = NULL WHERE event_id = ? AND person_id = ?')->execute([$event['id'], $personId]);
+            $this->log($event['id'], $actor, 'participant_unlinked', sprintf('%s hat die Konto-Verknüpfung von %s gelöst', $this->actorName($event, $actor), $name));
+        });
+    }
+
+    /**
+     * Owner/Admin: neuen Zugangscode erzeugen. Der alte Link funktioniert danach nicht mehr;
+     * wer mit Konto beigetreten ist, behält den Zugang über „Meine Events“.
+     */
+    public function regenerateCode(array $event, ?array $user, ?string $actor): string
+    {
+        $this->requireManage($event, $user);
+        return $this->transaction($event, function () use ($event, $actor) {
+            $code = $this->uniqueCode();
+            $this->db->prepare('UPDATE fs_events SET access_code = ? WHERE id = ?')->execute([$code, $event['id']]);
+            $this->log($event['id'], $actor, 'code_regenerated', sprintf('%s hat einen neuen Zugangscode erzeugt', $this->actorName($event, $actor)));
+            return $code;
+        });
+    }
+
+    /** Owner/Admin: Event mit allen Ausgaben, Zahlungen und dem Verlauf endgültig löschen. */
+    public function deleteEvent(array $event, ?array $user): void
+    {
+        $this->requireManage($event, $user);
+        $this->db->beginTransaction();
+        try {
+            $stmt = $this->db->prepare('SELECT person_id FROM fs_event_participants WHERE event_id = ?');
+            $stmt->execute([$event['id']]);
+            $personIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            // Anteile verweisen auf Personen; sie werden über die Ausgaben mitgelöscht.
+            $this->db->prepare('DELETE FROM fs_expenses WHERE event_id = ?')->execute([$event['id']]);
+            $this->db->prepare('DELETE FROM fs_settlements WHERE event_id = ?')->execute([$event['id']]);
+            $this->db->prepare('DELETE FROM fs_events WHERE id = ?')->execute([$event['id']]);
+            $deletePerson = $this->db->prepare('DELETE FROM fs_persons WHERE id = ? AND NOT EXISTS (SELECT 1 FROM fs_event_participants WHERE person_id = ?)');
+            foreach ($personIds as $personId) {
+                $deletePerson->execute([$personId, $personId]);
+            }
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
     }
 
     /** @param array<string,mixed> $in */
@@ -406,8 +635,11 @@ final class Store
 
     // ------------------------------------------------------------------ Gesamtzustand
 
-    /** @return array<string,mixed> */
-    public function state(array $event): array
+    /**
+     * @param array<string,mixed>|null $user angemeldetes Konto (für „viewer“)
+     * @return array<string,mixed>
+     */
+    public function state(array $event, ?array $user = null): array
     {
         $eventId = $event['id'];
         $participants = $this->participants($eventId);
@@ -472,7 +704,7 @@ final class Store
                 'created_at' => $this->isoUtc($event['created_at']),
                 'updated_at' => $this->isoUtc($event['updated_at']),
             ],
-            'participants' => array_map(fn ($p) => ['id' => $p['id'], 'name' => $p['name'], 'role' => $p['role']], $participants),
+            'participants' => array_map(fn ($p) => ['id' => $p['id'], 'name' => $p['name'], 'role' => $p['role'], 'linked' => $p['user_id'] !== null], $participants),
             'expenses' => $expenses,
             'settlements' => $settlements,
             'summary' => [
@@ -482,6 +714,11 @@ final class Store
                 'plan' => $plan,
             ],
             'activity' => $activity,
+            'viewer' => [
+                'person_id' => $user !== null ? $this->linkedPerson($eventId, $user['id']) : null,
+                'can_manage' => $this->canManage($event, $user),
+                'has_owner' => ($event['owner_user_id'] ?? null) !== null,
+            ],
         ];
     }
 
@@ -545,16 +782,39 @@ final class Store
         ];
     }
 
-    /** @return array<int,array{id:string,name:string,role:string,position:int}> */
+    /** @return array<int,array{id:string,name:string,role:string,position:int,user_id:?string}> */
     private function participants(string $eventId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT p.id, p.display_name AS name, ep.role, ep.position
+            'SELECT p.id, p.display_name AS name, ep.role, ep.position, ep.user_id
              FROM fs_event_participants ep JOIN fs_persons p ON p.id = ep.person_id
              WHERE ep.event_id = ? ORDER BY ep.position, ep.joined_at'
         );
         $stmt->execute([$eventId]);
-        return array_map(fn ($r) => ['id' => $r['id'], 'name' => $r['name'], 'role' => $r['role'], 'position' => (int) $r['position']], $stmt->fetchAll());
+        return array_map(fn ($r) => [
+            'id' => $r['id'],
+            'name' => $r['name'],
+            'role' => $r['role'],
+            'position' => (int) $r['position'],
+            'user_id' => $r['user_id'],
+        ], $stmt->fetchAll());
+    }
+
+    private function linkedPerson(string $eventId, string $userId): ?string
+    {
+        $stmt = $this->db->prepare('SELECT person_id FROM fs_event_participants WHERE event_id = ? AND user_id = ?');
+        $stmt->execute([$eventId, $userId]);
+        $id = $stmt->fetchColumn();
+        return $id === false ? null : (string) $id;
+    }
+
+    private function requireManage(array $event, ?array $user): void
+    {
+        if (!$this->canManage($event, $user)) {
+            throw new ApiError(403, 'forbidden', $user === null
+                ? 'Bitte melde dich an. Nur wer das Event erstellt hat, oder ein Admin kann das.'
+                : 'Das kann nur, wer das Event erstellt hat, oder ein Admin.');
+        }
     }
 
     private function participantName(string $eventId, string $personId): ?string
@@ -585,30 +845,35 @@ final class Store
 
     private function insertEventWithUniqueCode(string $id, string $name, ?string $date, ?string $location, ?string $notes, string $now): string
     {
-        $stmt = $this->db->prepare(
+        $code = $this->uniqueCode();
+        $this->db->prepare(
             'INSERT INTO fs_events (id, access_code, name, event_date, location, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-        );
+        )->execute([$id, $code, $name, $date, $location, $notes, $now, $now]);
+        return $code;
+    }
+
+    private function uniqueCode(): string
+    {
+        $check = $this->db->prepare('SELECT 1 FROM fs_events WHERE access_code = ?');
         for ($attempt = 0; $attempt < 5; $attempt++) {
             $code = '';
             for ($i = 0; $i < self::CODE_LENGTH; $i++) {
                 $code .= self::CODE_ALPHABET[random_int(0, strlen(self::CODE_ALPHABET) - 1)];
             }
-            $check = $this->db->prepare('SELECT 1 FROM fs_events WHERE access_code = ?');
             $check->execute([$code]);
             if ($check->fetchColumn() === false) {
-                $stmt->execute([$id, $code, $name, $date, $location, $notes, $now, $now]);
                 return $code;
             }
         }
         throw new RuntimeException('Konnte keinen eindeutigen Zugangscode erzeugen.');
     }
 
-    private function insertParticipant(string $eventId, string $name, string $role, int $position, string $now): string
+    private function insertParticipant(string $eventId, string $name, string $role, int $position, string $now, ?string $userId = null): string
     {
         $personId = Db::id();
         $this->db->prepare('INSERT INTO fs_persons (id, display_name, created_at) VALUES (?, ?, ?)')->execute([$personId, $name, $now]);
-        $this->db->prepare('INSERT INTO fs_event_participants (event_id, person_id, role, position, joined_at) VALUES (?, ?, ?, ?, ?)')
-            ->execute([$eventId, $personId, $role, $position, $now]);
+        $this->db->prepare('INSERT INTO fs_event_participants (event_id, person_id, role, position, joined_at, user_id) VALUES (?, ?, ?, ?, ?, ?)')
+            ->execute([$eventId, $personId, $role, $position, $now, $userId]);
         return $personId;
     }
 

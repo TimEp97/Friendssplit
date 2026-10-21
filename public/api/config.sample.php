@@ -12,12 +12,11 @@ return [
         // 'dsn' => 'sqlite:' . __DIR__ . '/../data/friendsplit.sqlite',
     ],
 
-    // Langer Zufallswert (mind. 16 Zeichen) für die einmalige Einrichtung über
-    // https://deine-domain.de/friendsplit/api/index.php?action=setup&key=…
-    // Nach der Einrichtung leeren, damit der Aufruf deaktiviert ist.
+    // Langer Zufallswert (mind. 16 Zeichen). Wird einmalig gebraucht, um in der App unter
+    // „Admin-Konto einrichten“ das erste Admin-Konto anzulegen. Danach wieder leeren.
     'setup_key' => '',
 
-    // true: Tabellen bei jedem Aufruf mit CREATE TABLE IF NOT EXISTS sicherstellen
-    // (praktisch für SQLite in der Entwicklung, für den Live-Betrieb nicht nötig).
-    'auto_migrate' => false,
+    // Anmelden nur über https:// erlauben (dringend empfohlen). Nur für die lokale
+    // Entwicklung ohne Zertifikat auf false setzen.
+    'require_https' => true,
 ];

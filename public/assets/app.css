@@ -155,6 +155,8 @@ section.card { margin-top: 1.25rem; }
   background: var(--accent); color: var(--on-accent); font-size: 0.75rem; font-weight: 700; vertical-align: 0.1em;
 }
 .badge--soft { background: var(--accent-soft); color: var(--accent-strong); }
+.badge--danger { background: var(--danger-soft); color: var(--danger); }
+code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.9em; background: var(--surface-2); padding: 0.05rem 0.3rem; border-radius: 6px; }
 .tag {
   display: inline-block; padding: 0 0.45rem; border-radius: 6px;
   background: var(--surface-2); color: var(--muted); font-size: 0.75rem; font-weight: 600;
@@ -175,6 +177,7 @@ section.card { margin-top: 1.25rem; }
 .hero h1 { font-size: clamp(2rem, 7vw, 2.8rem); max-width: 16ch; }
 .hero .lead { max-width: 40ch; margin-bottom: 1.25rem; }
 main > section > h2 { margin-top: 2rem; }
+main > section.card > h2:first-child { margin-top: 0; }
 
 /* ---------- Event-Kopf */
 
@@ -366,6 +369,10 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 }
 .person-btn:hover { border-color: var(--accent); }
 .person-btn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.person-btn:disabled { opacity: 0.6; cursor: not-allowed; box-shadow: none; }
+.person-btn:disabled:hover { border-color: var(--border); }
+.person-btn__text { display: grid; min-width: 0; overflow-wrap: anywhere; }
+.person-btn__hint { font-size: 0.75rem; font-weight: 500; color: var(--muted); }
 .picker .card { margin-bottom: 1rem; }
 
 /* ---------- Abrechnung */
@@ -396,8 +403,10 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 
 .share-card { background: var(--accent-soft); border-color: transparent; }
 .code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: clamp(1.4rem, 6vw, 2rem); font-weight: 700; letter-spacing: 0.08em; margin: 0.25rem 0 1rem; color: var(--accent-strong); }
-.person-row { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.5rem 0.5rem 0.9rem; }
-.person-row__name { flex: 1; font-weight: 650; display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.person-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.6rem; padding: 0.5rem 0.5rem 0.5rem 0.9rem; }
+.person-row__name { flex: 1 1 5rem; min-width: 0; font-weight: 650; display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; overflow-wrap: anywhere; }
+.person-row__name .badge, .person-row__name .tag { white-space: nowrap; }
+.person-row__actions { display: flex; margin-left: auto; }
 .person-row__bal { font-variant-numeric: tabular-nums; }
 .add-person { margin: 1rem 0 0.5rem; }
 .details { display: grid; gap: 0.5rem; margin: 0 0 1rem; }
@@ -407,6 +416,25 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 .log { list-style: none; margin: 0; padding: 0; }
 .log li { display: flex; justify-content: space-between; gap: 1rem; padding: 0.6rem 0; border-bottom: 1px solid var(--border); }
 .log time { white-space: nowrap; }
+
+/* ---------- Konto und Admin */
+
+.card--accent { background: var(--accent-soft); border-color: transparent; }
+.state-msg--inline { padding: 1.5rem 0; justify-content: flex-start; }
+.auth { max-width: 480px; margin: 0 auto; padding-top: 1.5rem; }
+.auth .card { margin: 1rem 0; }
+.check { display: flex; align-items: center; gap: 0.6rem; font-weight: 500; min-height: 44px; cursor: pointer; }
+.check input { width: 20px; height: 20px; }
+.account-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+.account-head__text { flex: 1 1 160px; display: grid; min-width: 0; overflow-wrap: anywhere; }
+.section-btn { margin-top: 1rem; width: 100%; }
+.link-box { margin-top: 1rem; padding: 0.85rem 1rem; border-radius: var(--radius-sm); background: var(--surface); border: 1.5px dashed var(--accent); }
+.link-box p { margin-bottom: 0.5rem; }
+.link-box__url { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 0.85rem; word-break: break-all; color: var(--accent-strong); }
+.admin-row { display: flex; align-items: center; gap: 0.75rem; }
+.admin-row__main { flex: 1; min-width: 0; display: grid; gap: 0.15rem; overflow-wrap: anywhere; }
+.admin-user__actions { margin-top: 0.75rem; }
+.share-card .list .card { box-shadow: none; }
 
 /* ---------- Dialog */
 

@@ -1,6 +1,6 @@
 // FriendSplit – Frontend. Reines JavaScript ohne Build-Schritt.
-// Alle Daten kommen von der API (api/index.php); der Browser speichert lokal nur,
-// welche Events auf diesem Gerät geöffnet wurden und welche Person gewählt ist.
+// Alle Daten kommen von der API (api/index.php). Mit Konto liegen „Meine Events“ auf dem Server;
+// ohne Anmeldung merkt sich der Browser lokal, welche Events geöffnet wurden und welche Person gewählt ist.
 
 const API_URL = 'api/index.php';
 const POLL_MS = 15000;
@@ -47,6 +47,10 @@ const ICONS = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.5 4.4-7 8-7s7 2.5 8 7"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+  unlink: '<circle cx="10" cy="8" r="4"/><path d="M3 21c1-4.5 3.7-7 7-7 1.4 0 2.7.4 3.8 1.2M16 16l5 5M21 16l-5 5"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>',
+  shield: '<path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6l-8-3Z"/>',
+  logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l-5-5 5-5M5 12h11"/>',
 };
 const icon = (name, cls = 'icon') => raw(`<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`);
 
@@ -134,6 +138,12 @@ function forgetEvent(code) {
 const getMe = (code) => local.get(`fs.me.${code}`, null);
 const setMe = (code, id) => (id ? local.set(`fs.me.${code}`, id) : local.remove(`fs.me.${code}`));
 
+/** Aktuelle Person im geöffneten Event: angemeldet die mit dem Konto verknüpfte, sonst die auf dem Gerät gewählte. */
+function meId() {
+  if (S.user) return S.data?.viewer?.person_id ?? null;
+  return getMe(S.code);
+}
+
 // ---------------------------------------------------------------- API
 
 class ApiError extends Error {
@@ -143,17 +153,20 @@ class ApiError extends Error {
   }
 }
 
-async function api(action, { body = null, code = null } = {}) {
+async function api(action, { body = null, code = null, query = null } = {}) {
   const headers = { Accept: 'application/json' };
   if (code) {
     headers['X-Event-Code'] = code;
     const me = getMe(code);
     if (me) headers['X-Person-Id'] = me;
   }
-  if (body) headers['Content-Type'] = 'application/json';
+  if (body) {
+    headers['Content-Type'] = 'application/json';
+    headers['X-Requested-With'] = 'FriendSplit';
+  }
   let response;
   try {
-    response = await fetch(`${API_URL}?action=${encodeURIComponent(action)}`, {
+    response = await fetch(`${API_URL}?action=${encodeURIComponent(action)}${query ? `&${new URLSearchParams(query)}` : ''}`, {
       method: body ? 'POST' : 'GET',
       headers,
       body: body ? JSON.stringify(body) : undefined,
@@ -168,6 +181,7 @@ async function api(action, { body = null, code = null } = {}) {
   if (!json) throw new ApiError('bad_response', `Unerwartete Antwort vom Server (HTTP ${response.status}). Die Änderung wurde möglicherweise nicht gespeichert.`, { status: response.status });
   if (!response.ok || !json.ok) {
     const e = json.error ?? {};
+    if (e.code === 'login_required') S.user = null; // Sitzung abgelaufen
     throw new ApiError(e.code ?? 'error', e.message ?? 'Unbekannter Fehler.', { fields: e.fields, status: response.status, data: e.data });
   }
   return json.data;
@@ -176,7 +190,7 @@ async function api(action, { body = null, code = null } = {}) {
 // ---------------------------------------------------------------- Zustand
 
 const S = {
-  route: { name: 'home' },
+  route: { name: '' },
   code: null,
   data: null,
   dataJson: '',
@@ -191,6 +205,14 @@ const S = {
   renaming: null,
   editingEvent: false,
   afterPick: null,
+  user: null, // angemeldetes Konto { id, username, display_name, role } oder null
+  needsSetup: false,
+  account: null, // { events } vom Server oder { error }
+  admin: null, // Daten für den Admin-Bereich oder { error }
+  lastInvite: null,
+  resetLink: null, // { userId, link }
+  tokenInfo: null, // Prüfergebnis für Einladungs- bzw. Reset-Link
+  afterLogin: null,
 };
 
 const main = document.getElementById('main');
@@ -207,8 +229,9 @@ function applyState(data) {
   S.dataJson = json;
   S.stale = false;
   rememberEvent(data.event);
+  // Lokal gewählte Person verwerfen, wenn es sie nicht mehr gibt oder sie inzwischen zu einem Konto gehört.
   const me = getMe(data.event.code);
-  if (me && !data.participants.some((p) => p.id === me)) setMe(data.event.code, null);
+  if (me && !data.participants.some((p) => p.id === me && !p.linked)) setMe(data.event.code, null);
   return changed;
 }
 
@@ -236,6 +259,8 @@ function parseRoute() {
   const [path, query = ''] = location.hash.replace(/^#\/?/, '').split('?');
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'neu') return { name: 'create' };
+  if (['login', 'konto', 'admin', 'einrichten'].includes(parts[0])) return { name: parts[0] };
+  if (['registrieren', 'passwort'].includes(parts[0])) return { name: parts[0], token: parts[1] ?? '' };
   if (parts[0] === 'e' && parts[1]) {
     const code = normalizeCode(parts[1]);
     if (parts[2] === 'ausgabe') return { name: 'expense', code, expenseId: parts[3] && parts[3] !== 'neu' ? parts[3] : null };
@@ -267,7 +292,7 @@ async function onRoute() {
       await loadEvent();
       if (S.route !== route) return;
     }
-    if (S.data && route.name !== 'wer' && !person(getMe(S.code))) {
+    if (S.data && route.name !== 'wer' && !person(meId())) {
       S.afterPick = location.hash;
       location.replace(eventPath('wer'));
       return;
@@ -275,6 +300,17 @@ async function onRoute() {
   } else {
     S.code = null;
   }
+  if (['konto', 'admin'].includes(route.name) && !S.user) {
+    S.afterLogin = location.hash;
+    location.replace('#/login');
+    return;
+  }
+  if (route.name === 'admin' && S.user.role !== 'admin') { location.replace('#/konto'); return; }
+  if (route.name === 'login' && S.user) { location.replace('#/'); return; }
+  const entered = route.name !== previous.name || route.token !== previous.token;
+  if (entered && ['registrieren', 'passwort'].includes(route.name)) loadTokenInfo(route);
+  if (entered && route.name === 'admin') loadAdmin();
+  if (route.name === 'home' && S.user && (entered || !S.account)) loadMyEvents();
   render();
   if (previous.name !== route.name || previous.code !== route.code || route.name === 'expense') {
     window.scrollTo(0, 0);
@@ -285,7 +321,10 @@ async function onRoute() {
 // ---------------------------------------------------------------- Rendering
 
 function render() {
-  const views = { home: viewHome, create: viewCreate, wer: viewPicker, ausgaben: viewExpenses, abrechnung: viewSettle, personen: viewPeople, expense: viewExpenseForm };
+  const views = {
+    home: viewHome, create: viewCreate, wer: viewPicker, ausgaben: viewExpenses, abrechnung: viewSettle, personen: viewPeople, expense: viewExpenseForm,
+    login: viewLogin, registrieren: viewRegister, passwort: viewReset, einrichten: viewSetup, konto: viewAccount, admin: viewAdmin,
+  };
   let content;
   if (S.route.code && !S.data) content = S.loadError ? viewLoadError() : viewLoading();
   else content = views[S.route.name]();
@@ -296,8 +335,8 @@ function render() {
 }
 
 function renderTabbar() {
-  const hideOn = ['create', 'expense', 'wer'];
-  const code = S.route.code ? S.code : myEvents()[0]?.code;
+  const hideOn = ['create', 'expense', 'wer', 'registrieren', 'passwort', 'einrichten'];
+  const code = S.route.code ? S.code : (S.account?.events?.[0]?.code ?? myEvents()[0]?.code);
   if (hideOn.includes(S.route.name) || (S.route.code && !S.data)) { tabbar.hidden = true; document.body.classList.remove('has-tabbar'); return; }
   const items = [
     { key: 'home', href: '#/', label: 'Events', icon: 'events' },
@@ -306,9 +345,13 @@ function renderTabbar() {
       { key: 'abrechnung', href: `#/e/${code}/abrechnung`, label: 'Abrechnung', icon: 'settle' },
       { key: 'personen', href: `#/e/${code}/personen`, label: 'Teilnehmende', icon: 'people' },
     ] : []),
+    S.user
+      ? { key: 'konto', href: '#/konto', label: 'Konto', icon: 'user', also: ['admin'] }
+      : { key: 'login', href: '#/login', label: 'Anmelden', icon: 'user' },
   ];
+  const current = (item) => S.route.name === item.key || item.also?.includes(S.route.name);
   tabbar.innerHTML = String(html`<ul>${items.map((item) => html`
-    <li><a href="${item.href}" class="tabbar__item" ${S.route.name === item.key ? raw('aria-current="page"') : ''}>${icon(item.icon)}<span>${item.label}</span></a></li>`)}</ul>`);
+    <li><a href="${item.href}" class="tabbar__item" ${current(item) ? raw('aria-current="page"') : ''}>${icon(item.icon)}<span>${item.label}</span></a></li>`)}</ul>`);
   tabbar.hidden = false;
   document.body.classList.add('has-tabbar');
 }
@@ -339,7 +382,7 @@ function staleBanner() {
 
 function eventHeader(subtitle) {
   const { event, participants } = S.data;
-  const me = person(getMe(S.code));
+  const me = person(meId());
   const meta = [event.date && formatDate(event.date), event.location, plural(participants.length, 'Teilnehmende:r', 'Teilnehmende')].filter(Boolean).join(' · ');
   return html`
     ${staleBanner()}
@@ -361,15 +404,65 @@ const fab = () => html`<a class="fab" href="${eventPath('ausgabe/neu')}">${icon(
 
 // ---------- Start / Events
 
+function eventItem(e, meta, forget = false) {
+  return html`
+    <li class="card card--link">
+      <a href="#/e/${e.code}/ausgaben" class="card__main">
+        <span class="card__title">${e.name}</span>
+        <span class="muted small">${meta}</span>
+      </a>
+      ${forget ? html`<button class="btn-icon" data-action="forget-event" data-code="${e.code}" aria-label="${e.name} aus dieser Liste entfernen" title="Aus Liste entfernen">${icon('close')}</button>` : ''}
+    </li>`;
+}
+
 function viewHome() {
-  const events = myEvents();
+  const device = myEvents();
+  const account = S.user ? S.account : null;
+  const inAccount = new Set((account?.events ?? []).map((e) => e.code));
+  const deviceOnly = device.filter((e) => !inAccount.has(e.code));
+  const deviceList = deviceOnly.length
+    ? html`<ul class="list">${deviceOnly.map((e) => eventItem(e, [e.date && formatDate(e.date), `zuletzt geöffnet ${relativeTime(e.opened)}`].filter(Boolean).join(' · '), true))}</ul>`
+    : html`<p class="muted">Hier erscheinen Events, die du auf diesem Gerät erstellt oder geöffnet hast.</p>`;
+
+  let accountList = '';
+  if (S.user) {
+    if (!account) accountList = html`<div class="state-msg state-msg--inline" role="status"><span class="spinner" aria-hidden="true"></span> Deine Events werden geladen …</div>`;
+    else if (account.error) accountList = html`<div class="banner banner--warn" role="alert"><span>${account.error}</span><button class="btn btn--small" data-action="reload-account">${icon('refresh')} Erneut versuchen</button></div>`;
+    else if (!account.events.length) accountList = html`<p class="muted">Noch keine Events in deinem Konto. Erstelle eins oder tritt mit einem Code bei.</p>`;
+    else accountList = html`<ul class="list">${account.events.map((e) => eventItem(e, [
+      e.date && formatDate(e.date),
+      `du bist ${e.person_name}`,
+      plural(e.participants, 'Person', 'Personen'),
+      e.is_owner && 'von dir erstellt',
+    ].filter(Boolean).join(' · ')))}</ul>`;
+  }
+
   return html`
     <section class="hero">
       <p class="brand"><img src="assets/icon.svg" alt="" width="36" height="36"> FriendSplit</p>
-      <h1 tabindex="-1">Gemeinsam unterwegs, fair geteilt.</h1>
-      <p class="lead">Tragt eure Ausgaben ein, wählt aus, wer dabei war – FriendSplit rechnet aus, wer wem wie viel schuldet.</p>
+      <h1 tabindex="-1">${S.user ? `Hallo, ${S.user.display_name}!` : 'Gemeinsam unterwegs, fair geteilt.'}</h1>
+      <p class="lead">${S.user
+        ? 'Deine Events sind in deinem Konto gespeichert – auf jedem Gerät, auf dem du angemeldet bist.'
+        : 'Tragt eure Ausgaben ein, wählt aus, wer dabei war – FriendSplit rechnet aus, wer wem wie viel schuldet.'}</p>
       <a class="btn btn--primary btn--large" href="#/neu">${icon('plus')} Neues Event erstellen</a>
     </section>
+
+    ${S.needsSetup ? html`
+      <section class="card card--accent">
+        <h2>Ersteinrichtung</h2>
+        <p>Es gibt noch kein Admin-Konto. Lege es jetzt an – dafür brauchst du den <code>setup_key</code> aus <code>api/config.php</code>.</p>
+        <a class="btn btn--primary" href="#/einrichten">${icon('shield')} Admin-Konto einrichten</a>
+      </section>` : ''}
+
+    ${!S.user && !S.needsSetup ? html`
+      <section class="card card--accent">
+        <h2>Deine Events auf allen Geräten</h2>
+        <p>Ohne Anmeldung merkt sich nur dieser Browser deine Events. Mit Konto findest du sie auf dem Handy, am Laptop und auch nach dem Löschen des Verlaufs wieder.</p>
+        <div class="row">
+          <a class="btn btn--primary" href="#/login">${icon('user')} Anmelden</a>
+          <span class="muted small">Neu hier? Konten gibt es nur mit Einladung.</span>
+        </div>
+      </section>` : ''}
 
     <section class="card">
       <h2>Mit Code beitreten</h2>
@@ -383,19 +476,14 @@ function viewHome() {
       </form>
     </section>
 
-    <section>
-      <h2>Meine Events</h2>
-      ${events.length === 0
-        ? html`<p class="muted">Hier erscheinen Events, die du auf diesem Gerät erstellt oder geöffnet hast.</p>`
-        : html`<ul class="list">${events.map((e) => html`
-          <li class="card card--link">
-            <a href="#/e/${e.code}/ausgaben" class="card__main">
-              <span class="card__title">${e.name}</span>
-              <span class="muted small">${[e.date && formatDate(e.date), `zuletzt geöffnet ${relativeTime(e.opened)}`].filter(Boolean).join(' · ')}</span>
-            </a>
-            <button class="btn-icon" data-action="forget-event" data-code="${e.code}" aria-label="${e.name} aus dieser Liste entfernen" title="Aus Liste entfernen">${icon('close')}</button>
-          </li>`)}</ul>`}
-    </section>`;
+    ${S.user ? html`<section><h2>Meine Events</h2>${accountList}</section>` : ''}
+
+    ${!S.user || deviceOnly.length ? html`
+      <section>
+        <h2>${S.user ? 'Nur auf diesem Gerät' : 'Meine Events'}</h2>
+        ${S.user ? html`<p class="hint">Diese Events hast du auf diesem Gerät ohne Anmeldung geöffnet. Öffne eins und wähle deinen Namen – dann wird es in deinem Konto gespeichert.</p>` : ''}
+        ${deviceList}
+      </section>` : ''}`;
 }
 
 function viewCreate() {
@@ -428,7 +516,7 @@ function viewCreate() {
       </div>
       <div class="field">
         <label for="f-creator">Dein Name <span class="req" aria-hidden="true">*</span></label>
-        <input id="f-creator" name="creator_name" maxlength="60" required autocomplete="given-name" placeholder="z. B. Mathis" aria-describedby="err-creator_name">
+        <input id="f-creator" name="creator_name" maxlength="60" required autocomplete="given-name" placeholder="z. B. Mathis" value="${S.user?.display_name ?? ''}" aria-describedby="err-creator_name">
         <p class="field-error" id="err-creator_name"></p>
       </div>
       <div class="field">
@@ -459,30 +547,42 @@ function renderCreatePeople() {
 
 function viewPicker() {
   const { event, participants } = S.data;
-  const me = getMe(S.code);
+  const me = meId();
+  const loggedIn = !!S.user;
   return html`
     ${staleBanner()}
     <section class="picker">
       <p class="eyebrow">${event.name}</p>
       <h1 tabindex="-1">Wer bist du?</h1>
       ${participants.length
-        ? html`<p class="lead">Wähle deinen Namen, um Ausgaben einzutragen.</p>
-          <ul class="person-grid">${participants.map((p) => html`
-            <li><button class="person-btn" data-action="pick-person" data-id="${p.id}" aria-pressed="${p.id === me}">
-              ${avatar(p.id, p.name)}<span>${p.name}</span></button></li>`)}</ul>`
+        ? html`<p class="lead">${loggedIn ? 'Wähle deinen Namen – das Event wird dann in deinem Konto gespeichert.' : 'Wähle deinen Namen, um Ausgaben einzutragen.'}</p>
+          <ul class="person-grid">${participants.map((p) => {
+            const taken = p.linked && p.id !== me;
+            return html`
+            <li><button class="person-btn" data-action="pick-person" data-id="${p.id}" aria-pressed="${p.id === me}" ${taken ? raw('disabled') : ''}>
+              ${avatar(p.id, p.name)}<span class="person-btn__text"><span>${p.name}</span>${taken ? html`<span class="person-btn__hint">${loggedIn ? 'gehört zu einem anderen Konto' : 'hat ein Konto – bitte anmelden'}</span>` : ''}</span></button></li>`;
+          })}</ul>`
         : html`<div class="empty empty--inline"><p>Noch keine Teilnehmenden – füge dich als erste Person hinzu.</p></div>`}
       <form id="join-self-form" class="card" novalidate>
         <h2>${participants.length ? 'Nicht in der Liste?' : 'Personen hinzufügen'}</h2>
         <div class="inline-form">
           <div class="field field--grow">
             <label for="f-self">Dein Name</label>
-            <input id="f-self" name="name" maxlength="60" autocomplete="given-name" aria-describedby="err-name">
+            <input id="f-self" name="name" maxlength="60" autocomplete="given-name" value="${loggedIn && !participants.some((p) => p.name.toLowerCase() === S.user.display_name.toLowerCase()) ? S.user.display_name : ''}" aria-describedby="err-name">
             <p class="field-error" id="err-name"></p>
           </div>
-          <button class="btn btn--primary" type="submit">Hinzufügen und auswählen</button>
+          <button class="btn btn--primary" type="submit">${loggedIn ? 'Hinzufügen und beitreten' : 'Hinzufügen und auswählen'}</button>
         </div>
       </form>
-      <p class="note">ℹ️ Die Namensauswahl ist keine sichere Anmeldung: Alle mit dem Event-Link können jeden Namen wählen. Teilt den Link daher nur innerhalb eurer Gruppe.</p>
+      ${loggedIn
+        ? html`<p class="note">Angemeldet als <strong>${S.user.display_name}</strong>. Dein Name in diesem Event wird mit deinem Konto verknüpft – niemand sonst kann ihn danach auswählen.</p>`
+        : html`
+          <section class="card card--accent">
+            <h2>Hast du ein Konto?</h2>
+            <p>Melde dich an, dann wird das Event in deinem Konto gespeichert und du findest es auf jedem Gerät wieder.</p>
+            <button class="btn btn--primary" data-action="login-here">${icon('user')} Anmelden</button>
+          </section>
+          <p class="note">ℹ️ Ohne Anmeldung ist die Namensauswahl keine sichere Anmeldung: Alle mit dem Event-Link können Namen ohne Konto wählen. Teilt den Link daher nur innerhalb eurer Gruppe.</p>`}
     </section>`;
 }
 
@@ -490,7 +590,7 @@ function viewPicker() {
 
 function kpis() {
   const { summary, expenses } = S.data;
-  const me = getMe(S.code);
+  const me = meId();
   const mine = summary.people[me]?.balance ?? 0;
   const mineText = mine > 0 ? 'bekommst du zurück' : mine < 0 ? 'musst du noch beisteuern' : 'du bist ausgeglichen';
   const mineClass = mine > 0 ? 'pos' : mine < 0 ? 'neg' : 'zero';
@@ -514,7 +614,7 @@ function shareExplanation(expense) {
 }
 
 function expenseCard(e) {
-  const me = getMe(S.code);
+  const me = meId();
   const cat = CAT[e.category] ?? CAT.sonstiges;
   const myShare = e.shares.find((s) => s.person_id === me)?.share_cents;
   const names = e.shares.map((s) => personName(s.person_id));
@@ -557,7 +657,7 @@ function viewExpenses() {
     if (groups.at(-1)?.day !== day) groups.push({ day, items: [] });
     groups.at(-1).items.push(e);
   }
-  const me = getMe(S.code);
+  const me = meId();
 
   let list;
   if (participants.length === 0) {
@@ -622,7 +722,7 @@ function viewExpenseForm() {
   if (!S.form || S.form.expenseId !== (expense?.id ?? null)) {
     S.form = { token: randomToken(), version: expense?.version ?? null, expenseId: expense?.id ?? null };
   }
-  const me = getMe(S.code);
+  const me = meId();
   const values = expense
     ? { amount: amountInput(expense.amount_cents), description: expense.description, category: expense.category, paid_by: expense.paid_by, participants: expense.shares.map((s) => s.person_id), spent_at: expense.spent_at, notes: expense.notes ?? '' }
     : { amount: '', description: '', category: 'getraenke', paid_by: me, participants: participants.map((p) => p.id), spent_at: nowLocalInput(), notes: '' };
@@ -744,7 +844,7 @@ function findDuplicate(body) {
 
 function viewSettle() {
   const { summary, participants, settlements, expenses } = S.data;
-  const me = getMe(S.code);
+  const me = meId();
   const nameFor = (id) => (id === me ? 'Du' : personName(id));
 
   const people = participants.map((p) => ({ ...p, ...(summary.people[p.id] ?? { paid: 0, share: 0, sent: 0, received: 0, balance: 0 }) }));
@@ -819,8 +919,8 @@ function viewSettle() {
 // ---------- Teilnehmende
 
 function viewPeople() {
-  const { event, participants, activity, summary } = S.data;
-  const me = getMe(S.code);
+  const { event, participants, activity, summary, viewer } = S.data;
+  const me = meId();
   return html`
     ${eventHeader('Teilnehmende')}
 
@@ -848,10 +948,14 @@ function viewPeople() {
             ${avatar(p.id, p.name)}
             <span class="person-row__name">${p.name}
               ${p.id === me ? html`<span class="badge">Du</span>` : ''}
-              ${p.role === 'organizer' ? html`<span class="badge badge--soft">Organisator:in</span>` : ''}</span>
+              ${p.role === 'organizer' ? html`<span class="badge badge--soft">Organisator:in</span>` : ''}
+              ${p.linked ? html`<span class="tag" title="Mit einem Benutzerkonto verknüpft">✓ Konto</span>` : ''}</span>
             <span class="muted small person-row__bal">${signedEuro(summary.people[p.id]?.balance ?? 0)}</span>
-            <button class="btn-icon" data-action="rename" data-id="${p.id}" aria-label="${p.name} umbenennen" title="Umbenennen">${icon('edit')}</button>
-            <button class="btn-icon btn-icon--danger" data-action="remove-person" data-id="${p.id}" aria-label="${p.name} entfernen" title="Entfernen">${icon('trash')}</button>
+            <span class="person-row__actions">
+              ${viewer.can_manage && p.linked && p.id !== me ? html`<button class="btn-icon" data-action="unlink-person" data-id="${p.id}" aria-label="Konto-Verknüpfung von ${p.name} lösen" title="Konto-Verknüpfung lösen">${icon('unlink')}</button>` : ''}
+              <button class="btn-icon" data-action="rename" data-id="${p.id}" aria-label="${p.name} umbenennen" title="Umbenennen">${icon('edit')}</button>
+              <button class="btn-icon btn-icon--danger" data-action="remove-person" data-id="${p.id}" aria-label="${p.name} entfernen" title="Entfernen">${icon('trash')}</button>
+            </span>
           </li>`)}</ul>
       <form id="add-person-form" class="inline-form add-person" novalidate>
         <div class="field field--grow">
@@ -892,9 +996,340 @@ function viewPeople() {
         : html`<p class="muted">Noch keine Änderungen.</p>`}
     </section>
 
-    <p class="note">ℹ️ Die Namensauswahl ist keine sichere Anmeldung: Alle mit dem Event-Link können Ausgaben eintragen, ändern und löschen. Jede Änderung erscheint im Verlauf.</p>
-    <button class="btn btn--ghost btn--danger-ghost" data-action="forget-event" data-code="${event.code}">Event von diesem Gerät entfernen</button>
+    ${viewer.can_manage ? html`
+      <section class="card section" aria-labelledby="manage-heading">
+        <h2 id="manage-heading">Verwaltung</h2>
+        <p class="muted small">Nur für die Person, die das Event erstellt hat, und für Admins sichtbar.</p>
+        <div class="row">
+          <button class="btn" data-action="regenerate-code">${icon('refresh')} Neuen Zugangscode erzeugen</button>
+          <button class="btn btn--danger-ghost" data-action="delete-event">${icon('trash')} Event löschen</button>
+        </div>
+        <p class="hint">Ein neuer Code macht den alten Link ungültig. Wer schon mit Konto beigetreten ist, behält den Zugang.</p>
+      </section>` : ''}
+
+    <p class="note">${S.user
+      ? `Du bist mit deinem Konto als ${person(me)?.name ?? '–'} angemeldet. Alle Teilnehmenden können Ausgaben eintragen, ändern und löschen – jede Änderung erscheint im Verlauf.`
+      : 'ℹ️ Ohne Anmeldung ist die Namensauswahl keine sichere Anmeldung: Alle mit dem Event-Link können Ausgaben eintragen, ändern und löschen. Jede Änderung erscheint im Verlauf.'}</p>
+    ${S.user
+      ? html`<button class="btn btn--ghost btn--danger-ghost" data-action="leave-event">${icon('logout')} Event verlassen</button>`
+      : html`<button class="btn btn--ghost btn--danger-ghost" data-action="forget-event" data-code="${event.code}">Event von diesem Gerät entfernen</button>`}
     ${participants.length ? fab() : ''}`;
+}
+
+// ---------- Konto: Anmelden, Registrieren, Passwort, Ersteinrichtung
+
+const inviteLink = (code) => `${location.origin}${location.pathname}#/registrieren/${formatCode(code)}`;
+const resetLinkFor = (code) => `${location.origin}${location.pathname}#/passwort/${formatCode(code)}`;
+
+/** Formularfeld mit Label, Hinweis und Fehlermeldung. */
+function field({ id, name, label, type = 'text', value = '', hint = '', attrs = '' }) {
+  const describedBy = [hint && `hint-${name}`, `err-${name}`].filter(Boolean).join(' ');
+  return html`
+    <div class="field">
+      <label for="${id}">${label}</label>
+      <input id="${id}" name="${name}" type="${type}" value="${value}" aria-describedby="${describedBy}" ${raw(attrs)}>
+      ${hint ? html`<p class="hint" id="hint-${name}">${hint}</p>` : ''}
+      <p class="field-error" id="err-${name}"></p>
+    </div>`;
+}
+const passwordFields = (label = 'Passwort') => html`
+  ${field({ id: 'a-password', name: 'password', label, type: 'password', hint: 'Mindestens 10 Zeichen. Tipp: ein kurzer Satz lässt sich gut merken.', attrs: 'autocomplete="new-password" required minlength="10"' })}
+  ${field({ id: 'a-password2', name: 'password2', label: `${label} wiederholen`, type: 'password', attrs: 'autocomplete="new-password" required' })}`;
+
+function authPage(title, lead, body) {
+  return html`
+    <section class="auth">
+      <p class="brand"><img src="assets/icon.svg" alt="" width="36" height="36"> FriendSplit</p>
+      <h1 tabindex="-1">${title}</h1>
+      ${lead ? html`<p class="lead">${lead}</p>` : ''}
+      ${body}
+    </section>`;
+}
+
+function viewLogin() {
+  return authPage('Anmelden', 'Mit Konto sind deine Events auf jedem Gerät gespeichert.', html`
+    <form id="login-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      ${field({ id: 'a-username', name: 'username', label: 'Benutzername', attrs: 'autocomplete="username" autocapitalize="none" spellcheck="false" required' })}
+      ${field({ id: 'a-password', name: 'password', label: 'Passwort', type: 'password', attrs: 'autocomplete="current-password" required' })}
+      <label class="check"><input type="checkbox" name="remember" checked> Angemeldet bleiben (90 Tage)</label>
+      <button class="btn btn--primary btn--large" type="submit">Anmelden</button>
+    </form>
+    <p class="muted small">Noch kein Konto? Konten gibt es nur mit Einladung – frag den Admin nach einem Einladungslink.<br>
+      Passwort vergessen? Der Admin kann dir einen Link zum Zurücksetzen schicken.</p>
+    <p><a href="#/">Ohne Anmeldung weiter</a></p>`);
+}
+
+function tokenState(route) {
+  const info = S.tokenInfo;
+  if (!route.token) return 'invalid';
+  if (!info || info.token !== route.token) return 'loading';
+  return info.valid ? 'valid' : 'invalid';
+}
+
+function viewRegister() {
+  const route = S.route;
+  if (S.user) {
+    return authPage('Du bist schon angemeldet', `Angemeldet als ${S.user.display_name}. Um ein weiteres Konto anzulegen, melde dich zuerst ab.`,
+      html`<div class="row"><a class="btn btn--primary" href="#/">Zu meinen Events</a><button class="btn" data-action="logout">${icon('logout')} Abmelden</button></div>`);
+  }
+  const state = route.token ? tokenState(route) : 'none';
+  return authPage('Konto erstellen', 'Du wurdest zu FriendSplit eingeladen. Leg dir ein Konto an – deine Events sind dann auf jedem Gerät gespeichert.', html`
+    ${state === 'invalid' ? html`<div class="banner banner--warn" role="alert"><span>Dieser Einladungslink ist ungültig, abgelaufen oder wurde schon benutzt. Frag nach einem neuen.</span></div>` : ''}
+    <form id="register-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      ${field({ id: 'a-invite', name: 'invite', label: 'Einladungscode', value: route.token, attrs: 'autocomplete="off" autocapitalize="characters" spellcheck="false" required placeholder="z. B. QX7M-4KPT-9HWA"' })}
+      ${field({ id: 'a-display', name: 'display_name', label: 'Dein Name', hint: 'So sehen dich die anderen, z. B. „Alex“.', attrs: 'autocomplete="given-name" maxlength="60" required' })}
+      ${field({ id: 'a-username', name: 'username', label: 'Benutzername für die Anmeldung', hint: 'Klein geschrieben, ohne Leerzeichen und Umlaute, z. B. „alex“ oder „alex.m“.', attrs: 'autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" required' })}
+      ${passwordFields()}
+      <button class="btn btn--primary btn--large" type="submit">Konto erstellen</button>
+    </form>
+    <p class="muted small">Gespeichert werden nur Benutzername, Name und ein verschlüsselter Passwort-Hash – keine E-Mail-Adresse.</p>
+    <p><a href="#/login">Ich habe schon ein Konto</a></p>`);
+}
+
+function viewReset() {
+  const route = S.route;
+  const state = tokenState(route);
+  if (state === 'loading') return html`<div class="state-msg" role="status"><span class="spinner" aria-hidden="true"></span> Link wird geprüft …</div>`;
+  if (state === 'invalid') {
+    return authPage('Link ungültig', 'Dieser Link zum Zurücksetzen ist ungültig, abgelaufen (24 Stunden) oder wurde schon benutzt. Bitte frag den Admin nach einem neuen.',
+      html`<a class="btn" href="#/login">Zur Anmeldung</a>`);
+  }
+  return authPage('Neues Passwort', `Lege ein neues Passwort für dein Konto „${S.tokenInfo.username}“ fest. Danach bist du angemeldet; andere Geräte werden abgemeldet.`, html`
+    <form id="reset-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      <input type="text" name="username" value="${S.tokenInfo.username}" autocomplete="username" hidden>
+      ${passwordFields('Neues Passwort')}
+      <button class="btn btn--primary btn--large" type="submit">Passwort speichern</button>
+    </form>`);
+}
+
+function viewSetup() {
+  if (!S.needsSetup) {
+    return authPage('Bereits eingerichtet', 'Es gibt schon ein Admin-Konto. Melde dich damit an.', html`<a class="btn btn--primary" href="#/login">Zur Anmeldung</a>`);
+  }
+  return authPage('Admin-Konto einrichten', 'Das erste Konto bekommt Admin-Rechte: Du kannst damit Freunde einladen und Konten verwalten.', html`
+    <form id="setup-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      ${field({ id: 'a-key', name: 'setup_key', label: 'Setup-Schlüssel', type: 'password', hint: 'Steht in api/config.php unter setup_key (mindestens 16 Zeichen). Nach der Einrichtung kannst du ihn dort wieder leeren.', attrs: 'autocomplete="off" required' })}
+      ${field({ id: 'a-display', name: 'display_name', label: 'Dein Name', attrs: 'autocomplete="given-name" maxlength="60" required' })}
+      ${field({ id: 'a-username', name: 'username', label: 'Benutzername', hint: 'Klein geschrieben, ohne Leerzeichen und Umlaute.', attrs: 'autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" required' })}
+      ${passwordFields()}
+      <button class="btn btn--primary btn--large" type="submit">Admin-Konto anlegen</button>
+    </form>`);
+}
+
+// ---------- Mein Konto
+
+function viewAccount() {
+  const u = S.user;
+  return html`
+    <header class="form-head"><h1 tabindex="-1">Mein Konto</h1></header>
+    <section class="card account-head">
+      ${avatar(u.id, u.display_name)}
+      <div class="account-head__text">
+        <strong>${u.display_name}</strong>
+        <span class="muted small">Benutzername: ${u.username}${u.role === 'admin' ? ' · Admin' : ''}</span>
+      </div>
+      <button class="btn" data-action="logout">${icon('logout')} Abmelden</button>
+    </section>
+    ${u.role === 'admin' ? html`<a class="btn btn--primary section-btn" href="#/admin">${icon('shield')} Admin-Bereich: Freunde einladen und Konten verwalten</a>` : ''}
+
+    <section class="card">
+      <h2>Anzeigename</h2>
+      <form id="profile-form" class="inline-form" novalidate>
+        <div class="field field--grow">
+          <label for="p-name">Name</label>
+          <input id="p-name" name="display_name" maxlength="60" value="${u.display_name}" aria-describedby="hint-display_name err-display_name">
+          <p class="hint" id="hint-display_name">Gilt für neue Events. Deinen Namen in einem bestehenden Event änderst du dort unter „Teilnehmende“.</p>
+          <p class="field-error" id="err-display_name"></p>
+        </div>
+        <button class="btn btn--primary" type="submit">Speichern</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Passwort ändern</h2>
+      <form id="password-form" class="form" novalidate>
+        <div class="form-error" id="form-error" role="alert" hidden></div>
+        <input type="text" name="username" value="${u.username}" autocomplete="username" hidden>
+        ${field({ id: 'a-current', name: 'current_password', label: 'Aktuelles Passwort', type: 'password', attrs: 'autocomplete="current-password" required' })}
+        ${passwordFields('Neues Passwort')}
+        <p class="hint">Andere Geräte werden dabei abgemeldet.</p>
+        <div class="form-actions"><button class="btn btn--primary" type="submit">Passwort ändern</button></div>
+      </form>
+    </section>
+
+    <p class="note">Gespeichert werden dein Benutzername, dein Anzeigename, ein verschlüsselter Passwort-Hash und deine Anmeldungen (Browser-Kennung, Zeitpunkt). Zum Löschen deines Kontos wende dich an den Admin – deine Ausgaben bleiben in den Events erhalten.</p>`;
+}
+
+// ---------- Admin-Bereich
+
+function viewAdmin() {
+  const a = S.admin;
+  const head = html`<header class="form-head"><a class="btn-icon" href="#/konto" aria-label="Zurück zum Konto">${icon('back')}</a><h1 tabindex="-1">Admin-Bereich</h1></header>`;
+  if (!a) return html`${head}<div class="state-msg" role="status"><span class="spinner" aria-hidden="true"></span> Wird geladen …</div>`;
+  if (a.error) return html`${head}<div class="banner banner--warn" role="alert"><span>${a.error}</span><button class="btn btn--small" data-action="reload-admin">${icon('refresh')} Erneut versuchen</button></div>`;
+
+  const invite = S.lastInvite;
+  return html`
+    ${head}
+    <section class="card share-card" aria-labelledby="invite-heading">
+      <h2 id="invite-heading">Freunde einladen</h2>
+      <p>Ohne Einladung kann sich niemand registrieren. Erstelle einen Link und schick ihn z. B. per WhatsApp.</p>
+      <form id="invite-form" class="form" novalidate>
+        <div class="field">
+          <label for="i-note">Notiz <span class="opt">(optional, nur für dich)</span></label>
+          <input id="i-note" name="note" maxlength="120" placeholder="z. B. für Alex" aria-describedby="err-note">
+          <p class="field-error" id="err-note"></p>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="i-uses">Wie viele Konten?</label>
+            <input id="i-uses" name="max_uses" type="number" min="1" max="50" value="1" inputmode="numeric" aria-describedby="hint-uses err-max_uses">
+            <p class="hint" id="hint-uses">1 = persönlicher Link. Mehr, wenn du ihn in eine Gruppe schickst.</p>
+            <p class="field-error" id="err-max_uses"></p>
+          </div>
+          <div class="field">
+            <label for="i-days">Gültig für (Tage)</label>
+            <input id="i-days" name="days" type="number" min="1" max="90" value="14" inputmode="numeric" aria-describedby="err-days">
+            <p class="field-error" id="err-days"></p>
+          </div>
+        </div>
+        <div class="form-actions"><button class="btn btn--primary" type="submit">${icon('plus')} Einladungslink erstellen</button></div>
+      </form>
+      ${invite ? html`
+        <div class="link-box" role="status">
+          <p><strong>Neuer Einladungslink</strong> – wird nur jetzt angezeigt:</p>
+          <p class="link-box__url">${inviteLink(invite)}</p>
+          <div class="row">
+            <button class="btn btn--primary btn--small" data-action="share-link" data-link="${inviteLink(invite)}" data-title="Einladung zu FriendSplit">${icon('share')} Teilen</button>
+            <button class="btn btn--small" data-action="copy-link-text" data-link="${inviteLink(invite)}">${icon('copy')} Kopieren</button>
+          </div>
+        </div>` : ''}
+      ${a.invites.length ? html`
+        <h3 class="small-heading">Offene Einladungen</h3>
+        <ul class="list">${a.invites.map((i) => html`
+          <li class="card admin-row">
+            <span class="admin-row__main"><strong>${i.note || 'Einladung'}</strong>
+              <span class="muted small">${i.uses} von ${i.max_uses} genutzt · gültig bis ${formatDateTime(i.expires_at)}</span></span>
+            <button class="btn btn--small btn--danger-ghost" data-action="revoke-invite" data-id="${i.id}">Widerrufen</button>
+          </li>`)}</ul>` : ''}
+    </section>
+
+    <section class="section" aria-labelledby="users-heading">
+      <h2 id="users-heading">Konten (${a.users.length})</h2>
+      <ul class="list">${a.users.map((u) => {
+        const self = u.id === S.user.id;
+        const reset = S.resetLink?.userId === u.id ? S.resetLink.link : null;
+        return html`
+        <li class="card admin-user">
+          <div class="admin-row">
+            ${avatar(u.id, u.display_name)}
+            <span class="admin-row__main">
+              <strong>${u.display_name} ${u.role === 'admin' ? html`<span class="badge badge--soft">Admin</span>` : ''} ${u.status === 'disabled' ? html`<span class="badge badge--danger">gesperrt</span>` : ''} ${self ? html`<span class="badge">Du</span>` : ''}</strong>
+              <span class="muted small">${u.username} · ${plural(u.events, 'Event', 'Events')} · ${u.last_login_at ? `zuletzt angemeldet ${relativeTime(u.last_login_at)}` : 'noch nie angemeldet'}</span>
+            </span>
+          </div>
+          ${self ? '' : html`
+            <div class="row admin-user__actions">
+              <button class="btn btn--small" data-action="reset-link" data-id="${u.id}">${icon('key')} Passwort-Link</button>
+              <button class="btn btn--small" data-action="toggle-role" data-id="${u.id}">${u.role === 'admin' ? 'Admin-Rechte entziehen' : 'Zum Admin machen'}</button>
+              <button class="btn btn--small" data-action="toggle-status" data-id="${u.id}">${u.status === 'disabled' ? 'Entsperren' : 'Sperren'}</button>
+              <button class="btn btn--small btn--danger-ghost" data-action="delete-user" data-id="${u.id}">${icon('trash')} Löschen</button>
+            </div>`}
+          ${reset ? html`
+            <div class="link-box" role="status">
+              <p>Link zum Zurücksetzen für <strong>${u.username}</strong> (24 Stunden gültig, einmalig):</p>
+              <p class="link-box__url">${reset}</p>
+              <div class="row">
+                <button class="btn btn--primary btn--small" data-action="share-link" data-link="${reset}" data-title="Neues Passwort für FriendSplit">${icon('share')} Teilen</button>
+                <button class="btn btn--small" data-action="copy-link-text" data-link="${reset}">${icon('copy')} Kopieren</button>
+              </div>
+            </div>` : ''}
+        </li>`;
+      })}</ul>
+    </section>
+
+    <section class="section" aria-labelledby="events-heading">
+      <h2 id="events-heading">Alle Events (${a.events.length})</h2>
+      ${a.events.length ? html`<ul class="list">${a.events.map((e) => eventItem(e, [
+        e.date && formatDate(e.date),
+        e.owner ? `von ${e.owner}` : 'ohne Konto erstellt',
+        `${plural(e.participants, 'Person', 'Personen')} (${e.linked} mit Konto)`,
+        euro(e.total_cents),
+        `Code ${formatCode(e.code)}`,
+      ].filter(Boolean).join(' · ')))}</ul>` : html`<p class="muted">Noch keine Events.</p>`}
+    </section>`;
+}
+
+// ---------------------------------------------------------------- Laden (Konto)
+
+async function loadMyEvents() {
+  try {
+    S.account = await api('my_events');
+  } catch (error) {
+    S.account = { error: error.message };
+  }
+  if (S.route.name === 'home' && !isBusyEditing()) render();
+}
+
+async function loadAdmin() {
+  try {
+    S.admin = await api('admin_overview');
+  } catch (error) {
+    S.admin = { error: error.message };
+  }
+  if (S.route.name === 'admin') render();
+}
+
+async function loadTokenInfo(route) {
+  S.tokenInfo = null;
+  if (!route.token) return;
+  try {
+    const info = await api(route.name === 'passwort' ? 'check_reset' : 'check_invite', { query: { code: route.token } });
+    S.tokenInfo = { ...info, token: route.token };
+  } catch {
+    S.tokenInfo = { valid: false, token: route.token };
+  }
+  if (S.route === route && !isBusyEditing()) render();
+}
+
+/** Nach Anmeldung/Registrierung: Daten neu laden, Geräte-Events anbieten, weiterleiten. */
+async function afterAuth(user, message) {
+  S.user = user;
+  S.needsSetup = false;
+  Object.assign(S, { account: null, admin: null, lastInvite: null, resetLink: null });
+  if (S.code) Object.assign(S, { data: null, dataJson: '' }); // Event mit Konto-Sicht neu laden
+  toast(message);
+  await offerImport();
+  const next = S.afterLogin ?? '#/';
+  S.afterLogin = null;
+  go(next);
+}
+
+/** Bietet an, Events, in denen auf diesem Gerät ein Name gewählt wurde, ins Konto zu übernehmen. */
+async function offerImport() {
+  let items = myEvents().map((e) => ({ code: e.code, person_id: getMe(e.code) })).filter((i) => i.person_id);
+  if (!items.length) return;
+  try {
+    const mine = new Set((await api('my_events')).events.map((e) => e.code));
+    items = items.filter((i) => !mine.has(i.code));
+    if (!items.length) return;
+    const ok = await confirmDialog({
+      title: 'Events übernehmen?',
+      text: `Auf diesem Gerät ${items.length === 1 ? 'ist 1 Event' : `sind ${items.length} Events`} gespeichert, in denen du einen Namen gewählt hast. In dein Konto übernehmen? Dann findest du ${items.length === 1 ? 'es' : 'sie'} auf jedem Gerät wieder.`,
+      confirm: 'Übernehmen',
+    });
+    if (!ok) return;
+    const result = await api('import_local', { body: { items } });
+    toast(result.imported
+      ? `${plural(result.imported, 'Event', 'Events')} in dein Konto übernommen`
+      : 'Nichts übernommen – die Namen sind schon mit anderen Konten verknüpft.');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 // ---------------------------------------------------------------- Rückmeldungen
@@ -988,7 +1423,7 @@ async function mutate(action, body, { success, button } = {}) {
   } catch (error) {
     setBusy(button, false);
     toast(error.message, 'error');
-    if (['conflict', 'expense_not_found', 'person_not_found', 'settlement_not_found'].includes(error.code)) {
+    if (['conflict', 'expense_not_found', 'person_not_found', 'settlement_not_found', 'person_taken'].includes(error.code)) {
       await loadEvent({ silent: true });
       render();
     }
@@ -1033,11 +1468,18 @@ const actions = {
   },
   'create-add-person': () => addCreatePerson(),
   'create-remove-person': (el) => { S.createPeople.splice(Number(el.dataset.index), 1); renderCreatePeople(); document.getElementById('f-person')?.focus(); },
-  'pick-person': (el) => {
-    setMe(S.code, el.dataset.id);
+  'pick-person': async (el) => {
+    const id = el.dataset.id;
     const next = S.afterPick && !S.afterPick.includes('/wer') ? S.afterPick : eventPath();
+    if (S.user) {
+      // Angemeldet: Person dauerhaft mit dem Konto verknüpfen → Event steht in „Meine Events“.
+      if (!(await mutate('join_event', { person_id: id }, { button: el }))) return;
+      S.account = null;
+    } else {
+      setMe(S.code, id);
+    }
     S.afterPick = null;
-    toast(`Du bist jetzt als ${personName(el.dataset.id)} unterwegs.`);
+    toast(`Du bist jetzt als ${personName(id)} unterwegs.`);
     go(next);
   },
   'switch-person': () => { S.afterPick = location.hash; go(eventPath('wer')); },
@@ -1074,9 +1516,9 @@ const actions = {
     if (!p) return;
     const ok = await confirmDialog({ title: `${p.name} entfernen?`, text: 'Die Person wird aus dem Event entfernt. Das geht nur, solange sie an keiner Ausgabe beteiligt ist.', confirm: 'Entfernen', danger: true });
     if (!ok) return;
-    const wasMe = p.id === getMe(S.code);
+    const wasMe = p.id === meId();
     const result = await mutate('remove_participant', { person_id: p.id }, { success: `${p.name} wurde entfernt`, button: el });
-    if (result && wasMe) { setMe(S.code, null); S.afterPick = eventPath('personen'); go(eventPath('wer')); }
+    if (result && wasMe) { if (!S.user) setMe(S.code, null); S.afterPick = eventPath('personen'); go(eventPath('wer')); }
   },
   'edit-event': () => { S.editingEvent = true; render(); document.getElementById('e-name')?.focus(); },
   'cancel-event-edit': () => { S.editingEvent = false; render(); },
@@ -1154,9 +1596,9 @@ const forms = {
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true);
     try {
-      const result = await api('add_participant', { body: { name }, code: S.code });
+      const result = await api(S.user ? 'join_event' : 'add_participant', { body: { name }, code: S.code });
       applyState(result.state);
-      setMe(S.code, result.person_id);
+      if (S.user) S.account = null; else setMe(S.code, result.person_id);
       const next = S.afterPick && !S.afterPick.includes('/wer') ? S.afterPick : eventPath();
       S.afterPick = null;
       toast(`Willkommen, ${name}!`);
@@ -1312,6 +1754,230 @@ Object.assign(actions, {
   },
 });
 
+// ---------------------------------------------------------------- Konto: Aktionen und Formulare
+
+/** Gemeinsamer Ablauf für Konto-Formulare: Fehler zurücksetzen, absenden, Fehler am Feld anzeigen. */
+async function submitForm(form, busyLabel, run) {
+  clearErrors(form);
+  const button = form.querySelector('[type="submit"]');
+  setBusy(button, true, busyLabel);
+  try {
+    await run(Object.fromEntries(new FormData(form)));
+  } catch (error) {
+    setBusy(button, false);
+    if (error.fields) showFieldErrors(form, error.fields);
+    else showFormError(form, error.message, []);
+  }
+}
+
+/** Prüft „Passwort wiederholen“; gibt false zurück und zeigt den Fehler an, wenn es nicht passt. */
+function passwordsMatch(form) {
+  if (form.elements.password.value === form.elements.password2.value) return true;
+  showFieldErrors(form, { password2: 'Die beiden Passwörter stimmen nicht überein.' });
+  return false;
+}
+
+/** Admin-Aufruf mit anschließendem Neuladen der Übersicht. */
+async function adminCall(action, body, { success, button } = {}) {
+  setBusy(button, true);
+  try {
+    const result = await api(action, { body });
+    await loadAdmin();
+    if (success) toast(success);
+    return result;
+  } catch (error) {
+    setBusy(button, false);
+    toast(error.message, 'error');
+    return null;
+  }
+}
+
+const adminUser = (id) => S.admin?.users?.find((u) => u.id === id);
+
+Object.assign(actions, {
+  'login-here': () => { S.afterLogin = location.hash; go('#/login'); },
+  'reload-account': () => { S.account = null; render(); loadMyEvents(); },
+  'reload-admin': () => { S.admin = null; render(); loadAdmin(); },
+  logout: async (el) => {
+    setBusy(el, true, 'Abmelden …');
+    try { await api('logout', { body: {} }); } catch { /* Sitzung ist ohnehin weg */ }
+    Object.assign(S, { user: null, account: null, admin: null, lastInvite: null, resetLink: null, data: null, dataJson: '' });
+    toast('Du bist abgemeldet.');
+    go('#/');
+  },
+  'leave-event': async (el) => {
+    const { event } = S.data;
+    const ok = await confirmDialog({
+      title: 'Event verlassen?',
+      text: `„${event.name}“ wird aus deinen Events entfernt. Dein Name und alle Ausgaben bleiben für die Gruppe erhalten – mit dem Code kannst du jederzeit wieder beitreten.`,
+      confirm: 'Verlassen',
+    });
+    if (!ok) return;
+    if (!(await mutate('leave_event', {}, { button: el }))) return;
+    forgetEvent(event.code);
+    S.account = null;
+    toast('Du hast das Event verlassen.');
+    go('#/');
+  },
+  'unlink-person': async (el) => {
+    const p = person(el.dataset.id);
+    if (!p) return;
+    const ok = await confirmDialog({
+      title: `Verknüpfung von ${p.name} lösen?`,
+      text: `${p.name} bleibt im Event, ist aber nicht mehr mit einem Konto verknüpft. Danach kann jemand anderes diesen Namen wählen – sinnvoll, wenn versehentlich der falsche Name gewählt wurde.`,
+      confirm: 'Verknüpfung lösen',
+    });
+    if (ok) await mutate('unlink_participant', { person_id: p.id }, { success: `Verknüpfung von ${p.name} gelöst`, button: el });
+  },
+  'regenerate-code': async (el) => {
+    const ok = await confirmDialog({
+      title: 'Neuen Zugangscode erzeugen?',
+      text: 'Der bisherige Link und Code funktionieren danach nicht mehr. Wer schon mit Konto beigetreten ist, behält den Zugang. Alle anderen brauchen den neuen Link.',
+      confirm: 'Neuen Code erzeugen',
+    });
+    if (!ok) return;
+    const oldCode = S.code;
+    const result = await mutate('regenerate_code', {}, { button: el });
+    if (!result) return;
+    forgetEvent(oldCode);
+    S.code = result.code;
+    rememberEvent(result.state.event);
+    S.account = null;
+    toast(`Neuer Code: ${formatCode(result.code)}`);
+    go(eventPath('personen'));
+  },
+  'delete-event': async (el) => {
+    const { event, expenses } = S.data;
+    const ok = await confirmDialog({
+      title: `„${event.name}“ löschen?`,
+      text: `Das Event wird mit ${plural(expenses.length, 'Ausgabe', 'Ausgaben')}, allen Zahlungen und dem Verlauf für alle endgültig gelöscht. Das lässt sich nicht rückgängig machen.`,
+      confirm: 'Endgültig löschen',
+      danger: true,
+    });
+    if (!ok) return;
+    setBusy(el, true, 'Löscht …');
+    try {
+      await api('delete_event', { body: {}, code: S.code });
+      forgetEvent(event.code);
+      Object.assign(S, { account: null, admin: null, data: null, dataJson: '' });
+      toast('Event gelöscht');
+      go('#/');
+    } catch (error) {
+      setBusy(el, false);
+      toast(error.message, 'error');
+    }
+  },
+  'share-link': async (el) => {
+    const { link, title } = el.dataset;
+    if (navigator.share) {
+      try { await navigator.share({ title, text: `${title}:`, url: link }); return; } catch (e) { if (e.name === 'AbortError') return; }
+    }
+    copyText(link, 'Link kopiert');
+  },
+  'copy-link-text': (el) => copyText(el.dataset.link, 'Link kopiert'),
+  'revoke-invite': async (el) => {
+    const ok = await confirmDialog({ title: 'Einladung widerrufen?', text: 'Der Link funktioniert danach nicht mehr. Bereits erstellte Konten bleiben bestehen.', confirm: 'Widerrufen' });
+    if (ok) await adminCall('admin_revoke_invite', { id: el.dataset.id }, { success: 'Einladung widerrufen', button: el });
+  },
+  'reset-link': async (el) => {
+    const u = adminUser(el.dataset.id);
+    const ok = await confirmDialog({ title: `Passwort-Link für ${u.display_name}?`, text: 'Du bekommst einen Link (24 Stunden gültig), mit dem ein neues Passwort gesetzt werden kann. Schick ihn nur an diese Person. Ein älterer Link wird dabei ungültig.', confirm: 'Link erstellen' });
+    if (!ok) return;
+    const result = await adminCall('admin_reset_link', { user_id: u.id }, { button: el });
+    if (result) { S.resetLink = { userId: u.id, link: resetLinkFor(result.code) }; render(); }
+  },
+  'toggle-role': async (el) => {
+    const u = adminUser(el.dataset.id);
+    const makeAdmin = u.role !== 'admin';
+    const ok = await confirmDialog({
+      title: makeAdmin ? `${u.display_name} zum Admin machen?` : `Admin-Rechte von ${u.display_name} entziehen?`,
+      text: makeAdmin ? 'Admins können Freunde einladen, Konten sperren und löschen und alle Events sehen und löschen.' : `${u.display_name} bleibt normales Mitglied.`,
+      confirm: makeAdmin ? 'Zum Admin machen' : 'Rechte entziehen',
+    });
+    if (ok) await adminCall('admin_update_user', { user_id: u.id, role: makeAdmin ? 'admin' : 'member' }, { success: 'Rolle geändert', button: el });
+  },
+  'toggle-status': async (el) => {
+    const u = adminUser(el.dataset.id);
+    const disable = u.status !== 'disabled';
+    const ok = await confirmDialog({
+      title: disable ? `${u.display_name} sperren?` : `${u.display_name} entsperren?`,
+      text: disable ? 'Das Konto wird sofort auf allen Geräten abgemeldet und kann sich nicht mehr anmelden. Events und Ausgaben bleiben erhalten.' : 'Das Konto kann sich wieder anmelden.',
+      confirm: disable ? 'Sperren' : 'Entsperren',
+      danger: disable,
+    });
+    if (ok) await adminCall('admin_update_user', { user_id: u.id, status: disable ? 'disabled' : 'active' }, { success: disable ? 'Konto gesperrt' : 'Konto entsperrt', button: el });
+  },
+  'delete-user': async (el) => {
+    const u = adminUser(el.dataset.id);
+    const ok = await confirmDialog({
+      title: `Konto von ${u.display_name} löschen?`,
+      text: `Das Konto „${u.username}“ wird gelöscht. Der Name bleibt in den Events mit allen Ausgaben erhalten, ist aber mit keinem Konto mehr verknüpft.`,
+      confirm: 'Konto löschen',
+      danger: true,
+    });
+    if (ok) await adminCall('admin_delete_user', { user_id: u.id }, { success: 'Konto gelöscht', button: el });
+  },
+});
+
+Object.assign(forms, {
+  'login-form': (form) => submitForm(form, 'Anmelden …', async (data) => {
+    const errors = {};
+    if (!data.username.trim()) errors.username = 'Bitte gib deinen Benutzernamen ein.';
+    if (!data.password) errors.password = 'Bitte gib dein Passwort ein.';
+    if (Object.keys(errors).length) throw new ApiError('validation', '', { fields: errors });
+    const result = await api('login', { body: { username: data.username.trim(), password: data.password, remember: !!data.remember } });
+    await afterAuth(result.user, `Hallo, ${result.user.display_name}!`);
+  }),
+
+  'register-form': (form) => {
+    if (!passwordsMatch(form)) return;
+    return submitForm(form, 'Erstellt …', async (data) => {
+      const result = await api('register', { body: { invite: data.invite, display_name: data.display_name, username: data.username, password: data.password } });
+      await afterAuth(result.user, `Willkommen, ${result.user.display_name}! Dein Konto ist eingerichtet.`);
+    });
+  },
+
+  'reset-form': (form) => {
+    if (!passwordsMatch(form)) return;
+    return submitForm(form, 'Speichert …', async (data) => {
+      const result = await api('reset_password', { body: { code: S.route.token, password: data.password } });
+      await afterAuth(result.user, 'Neues Passwort gespeichert – du bist angemeldet.');
+    });
+  },
+
+  'setup-form': (form) => {
+    if (!passwordsMatch(form)) return;
+    return submitForm(form, 'Richtet ein …', async (data) => {
+      const result = await api('setup_admin', { body: { setup_key: data.setup_key, display_name: data.display_name, username: data.username, password: data.password } });
+      S.afterLogin = '#/admin';
+      await afterAuth(result.user, 'Admin-Konto eingerichtet. Lade jetzt deine Freunde ein!');
+    });
+  },
+
+  'profile-form': (form) => submitForm(form, 'Speichert …', async (data) => {
+    const result = await api('update_profile', { body: { display_name: data.display_name } });
+    S.user = result.user;
+    render();
+    toast('Name gespeichert');
+  }),
+
+  'password-form': (form) => {
+    if (!passwordsMatch(form)) return;
+    return submitForm(form, 'Speichert …', async (data) => {
+      await api('change_password', { body: { current_password: data.current_password, password: data.password } });
+      render();
+      toast('Passwort geändert. Andere Geräte wurden abgemeldet.');
+    });
+  },
+
+  'invite-form': (form) => submitForm(form, 'Erstellt …', async (data) => {
+    const result = await api('admin_create_invite', { body: { note: data.note.trim(), max_uses: Number(data.max_uses), days: Number(data.days) } });
+    S.lastInvite = result.code;
+    await loadAdmin();
+    toast('Einladungslink erstellt');
+  }),
+});
+
 // ---------------------------------------------------------------- Ereignisse
 
 document.addEventListener('click', (event) => {
@@ -1377,7 +2043,7 @@ async function refresh() {
   const wasStale = S.stale;
   const changed = await loadEvent({ silent: true });
   if (changed || wasStale !== S.stale) {
-    if (S.route.name !== 'wer' && !person(getMe(S.code))) { onRoute(); return; }
+    if (S.route.name !== 'wer' && !person(meId())) { onRoute(); return; }
     render();
   }
 }
@@ -1385,4 +2051,15 @@ setInterval(refresh, POLL_MS);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 window.addEventListener('online', refresh);
 window.addEventListener('hashchange', onRoute);
-onRoute();
+
+async function boot() {
+  try {
+    const me = await api('me');
+    S.user = me.user;
+    S.needsSetup = me.needs_setup;
+  } catch {
+    // Ohne Konto weiter – Events per Code funktionieren trotzdem.
+  }
+  onRoute();
+}
+boot();

@@ -1,6 +1,6 @@
 # Konzept: Benutzerkonten, Login und „Meine Projekte“
 
-Stand: 21.10.2026 · Gilt für FriendSplit (PHP + MySQL bei ALL-INKL.COM)
+Stand: 21.10.2026 · Gilt für FriendSplit (PHP + MySQL bei ALL-INKL.COM) · **umgesetzt** (siehe Abschnitt 11 für die getroffenen Entscheidungen)
 
 In diesem Dokument heißen die bisherigen „Events“ auch **Projekte**. Gemeint ist dasselbe.
 
@@ -61,8 +61,8 @@ Innerhalb eines Projekts:
 
 | Projekt-Rolle | Darf |
 |---|---|
-| **Ersteller/in** (Owner) | Projektdaten ändern, Teilnehmende entfernen, Code erneuern, Projekt löschen |
-| **Teilnehmende** | Ausgaben anlegen, ändern, löschen; Zahlungen als erledigt markieren (wie bisher: Transparenz über Verlauf statt Verbote) |
+| **Ersteller/in** (Owner) | zusätzlich: Code erneuern, Konto-Verknüpfungen lösen, Projekt löschen |
+| **Teilnehmende** (mit oder ohne Konto) | wie bisher alles andere: Ausgaben anlegen, ändern, löschen; Zahlungen markieren; Projektdaten und Teilnehmende bearbeiten (Transparenz über Verlauf statt Verbote) |
 
 Der Admin hat in jedem Projekt dieselben Rechte wie der Owner.
 
@@ -259,11 +259,11 @@ Alle `admin_*`-Aktionen prüfen serverseitig `role = 'admin'`.
 
 ### 6.4 Geänderte bestehende Aktionen
 
-- **Alle** Projekt-Aktionen (`event`, `save_expense`, …) verlangen eine gültige Sitzung **und** dass das Konto Teilnehmer des Projekts ist (oder Admin). Ohne Login: `401 login_required`; angemeldet, aber nicht beigetreten: `403 not_member` → die App leitet zum Beitreten weiter.
-- `X-Event-Code` bleibt der Schlüssel zum Projekt (die App kennt ihn aus `my_events`), reicht aber allein nicht mehr.
-- **`X-Person-Id` entfällt.** Die handelnde Person ermittelt der Server aus Konto + Projekt (`Store::actor()` bekommt `user_id` statt der frei wählbaren Person-ID). Damit kann niemand mehr in fremdem Namen eintragen.
-- `create_event`: `creator_name` wird durch den Anzeigenamen des Kontos ersetzt; Owner und `user_id` werden gesetzt.
-- `update_event`, `remove_participant`: nur Owner/Admin.
+- Da Login **nicht Pflicht** ist (Entscheidung 3), reicht `X-Event-Code` weiterhin für alle Projekt-Aktionen.
+- **Angemeldet** ermittelt der Server die handelnde Person aus Konto + Projekt; `X-Person-Id` wird dann ignoriert.
+- **Ohne Anmeldung** gilt `X-Person-Id` wie bisher, aber nur für Personen, die mit keinem Konto verknüpft sind. Damit kann niemand im Namen eines Kontos eintragen.
+- `create_event`: Mit Konto ist „Dein Name“ mit dem Anzeigenamen vorbelegt; Owner und `user_id` werden gesetzt.
+- Wer die Organisator-Person eines (ohne Konto erstellten) Projekts übernimmt, wird dessen Owner.
 
 ---
 
@@ -342,12 +342,12 @@ Jeder Schritt ist für sich lauffähig und wird mit `tests/ApiTest.php` abgesich
 
 ---
 
-## 11. Offene Entscheidungen
+## 11. Entscheidungen
 
-Diese Punkte sollten vor der Umsetzung entschieden werden. Die Empfehlung ist jeweils fett.
+1. **Registrierung:** nur mit Einladung vom Admin.
+2. **Anmeldename:** Benutzername + Passwort (keine E-Mail).
+3. **Zugang ohne Konto:** erlaubt – Login ist nicht Pflicht. Projekte funktionieren weiter per Link/Code; ein Konto sorgt dafür, dass „Meine Projekte“ auf jedem Gerät erscheint und der eigene Name geschützt ist.
+4. **Ausgaben bearbeiten:** alle Teilnehmenden (wie bisher, mit Verlauf).
+5. **Projekte anlegen:** jede/r – mit oder ohne Konto.
 
-1. **Registrierung:** **nur mit Einladung vom Admin** · oder offen für alle mit einem gemeinsamen Gruppen-Code.
-2. **Anmeldename:** **Benutzername** (kein E-Mail-Versand nötig) · oder E-Mail-Adresse (ermöglicht später Passwort-Reset per Mail).
-3. **Zugang ohne Konto:** **nein, Login ist Pflicht** · oder Gäste dürfen per Code mitlesen bzw. mitschreiben.
-4. **Ausgaben bearbeiten:** **alle Teilnehmenden (wie bisher, mit Verlauf)** · oder nur Ersteller/in der Ausgabe + Owner + Admin.
-5. **Projekte anlegen:** **jedes Mitglied** · oder nur der Admin.
+Abweichend von Abschnitt 4.5 gilt deshalb: Wer ohne Konto per Code kommt, wählt wie bisher einen Namen – aber nur einen, der noch keinem Konto gehört.

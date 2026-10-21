@@ -1,6 +1,64 @@
 -- FriendSplit – Datenbankschema für MySQL / MariaDB (z. B. ALL-INKL.COM)
 -- Import über phpMyAdmin oder über api/index.php?action=setup&key=… (siehe README).
 -- Alle Statements sind idempotent (IF NOT EXISTS) und können gefahrlos erneut ausgeführt werden.
+-- Für eine bestehende Installation (Version 1, ohne Benutzerkonten) stattdessen update-2.mysql.sql
+-- importieren – oder einfach die App aufrufen: Sie führt fehlende Updates automatisch aus.
+
+CREATE TABLE IF NOT EXISTS fs_users (
+  id            CHAR(16)     NOT NULL,
+  username      VARCHAR(40)  NOT NULL,
+  display_name  VARCHAR(60)  NOT NULL,
+  email         VARCHAR(190) NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  role          VARCHAR(10)  NOT NULL DEFAULT 'member',
+  status        VARCHAR(10)  NOT NULL DEFAULT 'active',
+  created_at    DATETIME     NOT NULL,
+  last_login_at DATETIME     NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_users_username (username)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fs_sessions (
+  id           CHAR(16)     NOT NULL,
+  user_id      CHAR(16)     NOT NULL,
+  token_hash   CHAR(64)     NOT NULL,
+  remember     TINYINT(1)   NOT NULL DEFAULT 0,
+  created_at   DATETIME     NOT NULL,
+  last_seen_at DATETIME     NOT NULL,
+  expires_at   DATETIME     NOT NULL,
+  user_agent   VARCHAR(190) NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_sessions_token (token_hash),
+  KEY idx_sessions_user (user_id),
+  CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Einladungen (kind = 'invite') und Links zum Zurücksetzen des Passworts (kind = 'reset')
+CREATE TABLE IF NOT EXISTS fs_tokens (
+  id         CHAR(16)     NOT NULL,
+  kind       VARCHAR(10)  NOT NULL,
+  token_hash CHAR(64)     NOT NULL,
+  user_id    CHAR(16)     NULL,
+  created_by CHAR(16)     NULL,
+  note       VARCHAR(120) NULL,
+  max_uses   INT          NOT NULL DEFAULT 1,
+  uses       INT          NOT NULL DEFAULT 0,
+  expires_at DATETIME     NOT NULL,
+  created_at DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_tokens_hash (token_hash),
+  CONSTRAINT fk_tokens_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fs_login_attempts (
+  id           CHAR(16)    NOT NULL,
+  username     VARCHAR(40) NOT NULL,
+  ip_hash      CHAR(64)    NOT NULL,
+  attempted_at DATETIME    NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_attempts_user (username, attempted_at),
+  KEY idx_attempts_ip (ip_hash, attempted_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fs_events (
   id                   CHAR(16)     NOT NULL,
@@ -12,6 +70,7 @@ CREATE TABLE IF NOT EXISTS fs_events (
   created_by_person_id CHAR(16)     NULL,
   created_at           DATETIME     NOT NULL,
   updated_at           DATETIME     NOT NULL,
+  owner_user_id        CHAR(16)     NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uq_events_access_code (access_code)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -30,10 +89,13 @@ CREATE TABLE IF NOT EXISTS fs_event_participants (
   role      VARCHAR(20) NOT NULL DEFAULT 'member',
   position  INT         NOT NULL DEFAULT 0,
   joined_at DATETIME    NOT NULL,
+  user_id   CHAR(16)    NULL,
   PRIMARY KEY (event_id, person_id),
+  UNIQUE KEY uq_participants_user (event_id, user_id),
   KEY idx_participants_person (person_id),
   CONSTRAINT fk_participants_event  FOREIGN KEY (event_id)  REFERENCES fs_events (id)  ON DELETE CASCADE,
-  CONSTRAINT fk_participants_person FOREIGN KEY (person_id) REFERENCES fs_persons (id) ON DELETE CASCADE
+  CONSTRAINT fk_participants_person FOREIGN KEY (person_id) REFERENCES fs_persons (id) ON DELETE CASCADE,
+  CONSTRAINT fk_participants_user   FOREIGN KEY (user_id)   REFERENCES fs_users (id)   ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fs_expenses (

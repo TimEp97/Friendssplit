@@ -3,6 +3,18 @@ declare(strict_types=1);
 
 final class Db
 {
+    /** Aktuelle Schema-Version. Neue Versionen bekommen eine Datei schema/update-<n>.<treiber>.sql. */
+    public const VERSION = 2;
+
+    /**
+     * Woran eine Version erkennbar ist: Abfragen, die erst ab dieser Version funktionieren.
+     * Geprüft wird von der neuesten Version abwärts.
+     */
+    private const PROBES = [
+        2 => ['SELECT owner_user_id FROM fs_events LIMIT 1', 'SELECT id FROM fs_users LIMIT 1'],
+        1 => ['SELECT id FROM fs_events LIMIT 1'],
+    ];
+
     /** @param array{dsn:string,user?:string|null,password?:string|null} $config */
     public static function connect(array $config): PDO
     {
@@ -27,20 +39,74 @@ final class Db
         return (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
     }
 
-    /** Legt alle Tabellen an, falls sie noch nicht existieren. */
+    /** Installierte Schema-Version: 0 = noch keine Tabellen. */
+    public static function version(PDO $pdo): int
+    {
+        foreach (self::PROBES as $version => $queries) {
+            try {
+                foreach ($queries as $sql) {
+                    $pdo->query($sql)->closeCursor();
+                }
+                return $version;
+            } catch (PDOException) {
+                // Version noch nicht installiert – nächstältere prüfen.
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Legt alle Tabellen an bzw. bringt eine ältere Installation auf den aktuellen Stand.
+     * Wird bei jedem Aufruf geprüft (zwei kleine Abfragen) und arbeitet nur, wenn etwas fehlt.
+     */
     public static function migrate(PDO $pdo): void
     {
-        $file = __DIR__ . '/../schema/' . (self::driver($pdo) === 'sqlite' ? 'sqlite.sql' : 'mysql.sql');
-        $sql = (string) file_get_contents($file);
+        if (self::version($pdo) >= self::VERSION) {
+            return;
+        }
+        $driver = self::driver($pdo);
+        $locked = $driver === 'mysql' && (int) $pdo->query("SELECT GET_LOCK('friendsplit_migrate', 15)")->fetchColumn() === 1;
+        try {
+            $version = self::version($pdo); // erneut prüfen, falls parallel schon migriert wurde
+            if ($version === 0) {
+                self::runFile($pdo, $driver === 'sqlite' ? 'sqlite.sql' : 'mysql.sql', false);
+            } else {
+                for ($v = $version + 1; $v <= self::VERSION; $v++) {
+                    self::runFile($pdo, "update-$v." . ($driver === 'sqlite' ? 'sqlite' : 'mysql') . '.sql', true);
+                }
+            }
+        } finally {
+            if ($locked) {
+                $pdo->query("SELECT RELEASE_LOCK('friendsplit_migrate')")->closeCursor();
+            }
+        }
+    }
+
+    /** @param bool $tolerant bereits vorhandene Spalten/Schlüssel überspringen (abgebrochenes Update fortsetzen) */
+    private static function runFile(PDO $pdo, string $file, bool $tolerant): void
+    {
+        $sql = (string) file_get_contents(__DIR__ . '/../schema/' . $file);
         $sql = (string) preg_replace('/^\s*--.*$/m', '', $sql);
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
-            $pdo->exec($statement);
+            try {
+                $pdo->exec($statement);
+            } catch (PDOException $e) {
+                if (!$tolerant || !preg_match('/duplicate|already exists/i', $e->getMessage())) {
+                    throw $e;
+                }
+            }
         }
     }
 
     public static function now(): string
     {
         return gmdate('Y-m-d H:i:s');
+    }
+
+    /** UTC-Zeitpunkt relativ zu jetzt, z. B. Db::at('+14 days'). */
+    public static function at(string $modifier): string
+    {
+        return gmdate('Y-m-d H:i:s', (int) strtotime($modifier));
     }
 
     /**

@@ -84,4 +84,30 @@ final class Http
         $value = $_SERVER[$key] ?? null;
         return is_string($value) && $value !== '' ? $value : null;
     }
+
+    public static function isHttps(): bool
+    {
+        $https = strtolower((string) ($_SERVER['HTTPS'] ?? ''));
+        return ($https !== '' && $https !== 'off')
+            || (string) ($_SERVER['SERVER_PORT'] ?? '') === '443'
+            || strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
+    }
+
+    /** Setzt (oder löscht mit $value = null) ein HttpOnly-Cookie, das nur an die API geschickt wird. */
+    public static function cookie(string $name, ?string $value, int $expires = 0): void
+    {
+        $path = rtrim(str_replace('\\', '/', dirname((string) ($_SERVER['SCRIPT_NAME'] ?? '/'))), '/') . '/';
+        setcookie($name, $value ?? '', [
+            'expires' => $value === null ? 1 : $expires,
+            'path' => $path,
+            'secure' => self::isHttps(),
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+    }
+
+    public static function clientIp(): string
+    {
+        return (string) ($_SERVER['REMOTE_ADDR'] ?? '');
+    }
 }
