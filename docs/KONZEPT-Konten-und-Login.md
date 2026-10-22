@@ -1,6 +1,19 @@
 # Konzept: Benutzerkonten, Login und „Meine Projekte“
 
-Stand: 21.10.2026 · Gilt für FriendSplit (PHP + MySQL bei ALL-INKL.COM) · **umgesetzt** (siehe Abschnitt 11 für die getroffenen Entscheidungen)
+Stand: 22.10.2026 · **umgesetzt** (siehe Abschnitt 11 für die getroffenen Entscheidungen)
+
+> **Hinweis:** Das Konzept entstand für die erste Version in PHP + MySQL bei ALL-INKL. Am 22.10.2026 wurde die App komplett auf **Node.js ohne Zusatzpakete** umgestellt. Abläufe, Rollen, Datenmodell (Tabellen und Spalten) und API-Aktionen gelten unverändert; technisch umgesetzt ist es jetzt so:
+>
+> | Konzept (PHP-Version) | Umsetzung (Node.js) |
+> |---|---|
+> | MySQL bei ALL-INKL, Import per phpMyAdmin | SQLite (`node:sqlite`) in `/data`, Schema-Versionen über `PRAGMA user_version` (`server/lib/db.js`) |
+> | `password_hash()` (bcrypt) | `scrypt` aus `node:crypto` (`server/lib/auth.js`) |
+> | `api/index.php?action=…`, `config.php` | `/api?action=…`, Umgebungsvariablen (`SETUP_KEY`, `REQUIRE_HTTPS`, …) |
+> | HTTPS über ALL-INKL (KAS) | Caddy vor dem Node-Server, automatisches Let's-Encrypt-Zertifikat (`compose.yaml`) |
+> | `.htaccess`-Sperren und -Header | Server liefert nur Dateien aus `public/` aus und setzt die Sicherheits-Header selbst |
+> | Tests `tests/*.php` | `npm test` (`node --test`) |
+>
+> Abschnitt 1 beschreibt die Diagnose an der PHP-Version und ist nur noch historisch. Betrieb und Umzug: siehe README.
 
 In diesem Dokument heißen die bisherigen „Events“ auch **Projekte**. Gemeint ist dasselbe.
 

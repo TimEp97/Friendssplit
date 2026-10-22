@@ -1,0 +1,36 @@
+# FriendSplit mit automatischem HTTPS (Caddy holt das Let's-Encrypt-Zertifikat selbst).
+# Start: DOMAIN und SETUP_KEY in .env eintragen (siehe .env.example), dann: docker compose up -d
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRUST_PROXY: "true"
+      SETUP_KEY: ${SETUP_KEY:-}
+    volumes:
+      - friendsplit-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Bitte DOMAIN in .env setzen}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [app]
+
+volumes:
+  friendsplit-data:
+  caddy-data:
+  caddy-config:

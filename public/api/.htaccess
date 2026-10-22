@@ -1,4 +1,0 @@
-# Konfiguration und Beispielkonfiguration nicht direkt aufrufbar machen
-<FilesMatch "^config(\.sample)?\.php$">
-  Require all denied
-</FilesMatch>

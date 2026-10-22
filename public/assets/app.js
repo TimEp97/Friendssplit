@@ -1,8 +1,8 @@
 // FriendSplit – Frontend. Reines JavaScript ohne Build-Schritt.
-// Alle Daten kommen von der API (api/index.php). Mit Konto liegen „Meine Events“ auf dem Server;
+// Alle Daten kommen von der API des Node.js-Servers (/api). Mit Konto liegen „Meine Events“ auf dem Server;
 // ohne Anmeldung merkt sich der Browser lokal, welche Events geöffnet wurden und welche Person gewählt ist.
 
-const API_URL = 'api/index.php';
+const API_URL = 'api';
 const POLL_MS = 15000;
 const MAX_AMOUNT_CENTS = 10_000_000;
 
@@ -450,7 +450,7 @@ function viewHome() {
     ${S.needsSetup ? html`
       <section class="card card--accent">
         <h2>Ersteinrichtung</h2>
-        <p>Es gibt noch kein Admin-Konto. Lege es jetzt an – dafür brauchst du den <code>setup_key</code> aus <code>api/config.php</code>.</p>
+        <p>Es gibt noch kein Admin-Konto. Lege es jetzt an – dafür brauchst du den Setup-Schlüssel (<code>SETUP_KEY</code>) aus der Server-Konfiguration.</p>
         <a class="btn btn--primary" href="#/einrichten">${icon('shield')} Admin-Konto einrichten</a>
       </section>` : ''}
 
@@ -1112,7 +1112,7 @@ function viewSetup() {
   return authPage('Admin-Konto einrichten', 'Das erste Konto bekommt Admin-Rechte: Du kannst damit Freunde einladen und Konten verwalten.', html`
     <form id="setup-form" class="form card" novalidate>
       <div class="form-error" id="form-error" role="alert" hidden></div>
-      ${field({ id: 'a-key', name: 'setup_key', label: 'Setup-Schlüssel', type: 'password', hint: 'Steht in api/config.php unter setup_key (mindestens 16 Zeichen). Nach der Einrichtung kannst du ihn dort wieder leeren.', attrs: 'autocomplete="off" required' })}
+      ${field({ id: 'a-key', name: 'setup_key', label: 'Setup-Schlüssel', type: 'password', hint: 'Steht in der Server-Konfiguration als SETUP_KEY (mindestens 16 Zeichen). Nach der Einrichtung kannst du ihn dort wieder entfernen.', attrs: 'autocomplete="off" required' })}
       ${field({ id: 'a-display', name: 'display_name', label: 'Dein Name', attrs: 'autocomplete="given-name" maxlength="60" required' })}
       ${field({ id: 'a-username', name: 'username', label: 'Benutzername', hint: 'Klein geschrieben, ohne Leerzeichen und Umlaute.', attrs: 'autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="40" required' })}
       ${passwordFields()}

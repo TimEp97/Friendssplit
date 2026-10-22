@@ -1,0 +1,5 @@
+# Caddy leitet HTTP automatisch auf HTTPS um und erneuert das Zertifikat selbstständig.
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy app:3000
+}

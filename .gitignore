@@ -1,4 +1,7 @@
-public/api/config.php
-public/data/*.sqlite*
+# Datenbank und Sicherungen (nie einchecken)
+data/
+*.sqlite
+*.sqlite-*
+.env
 node_modules/
 .DS_Store
