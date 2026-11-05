@@ -5,6 +5,7 @@ Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen
 - Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen
 - Ausgaben mit Betrag, Beschreibung, Kategorie (🍹 🍕 🎟️ 🚕 🏨 🛍️), zahlender Person, Beteiligten, Datum und Notiz
 - Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
+- **PayPal:** Jede Person kann ihren PayPal.me-Link hinterlegen (eintippen, einfügen oder den PayPal-QR-Code scannen). In der Abrechnung öffnet ein Button PayPal direkt mit dem richtigen Betrag
 - Zahlungen als erledigt markieren (und zurücknehmen), Verlauf aller Änderungen
 - Alle Daten zentral in MySQL; Änderungen anderer erscheinen automatisch (Aktualisierung alle 15 s und beim Zurückkehren in den Tab)
 
@@ -49,6 +50,13 @@ tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end
 5. **HTTPS:** Im KAS ein (kostenloses Let's-Encrypt-)Zertifikat für die Domain aktivieren. Kopieren und Teilen von Links funktionieren im Browser nur über HTTPS zuverlässig.
 6. **Einbinden:** Auf der bestehenden Webseite einen Link auf `/friendsplit/` setzen. Alle Pfade sind relativ, der Ordnername ist frei wählbar.
 
+### Update einer bestehenden Installation
+
+Neue Dateien per FTP hochladen (deine `api/config.php` bleibt unverändert). Danach die Datenbank einmal nachrüsten:
+
+- `setup_key` in `config.php` setzen und `…/api/index.php?action=setup&key=DEIN_SETUP_KEY` aufrufen. Das ergänzt fehlende Spalten automatisch.
+- Oder in phpMyAdmin `api/schema/upgrade-paypal.sql` importieren.
+
 Alle Tabellen haben das Präfix `fs_`, damit sie neben bestehenden Tabellen in derselben Datenbank liegen können.
 
 ## Lokale Entwicklung und Tests
@@ -71,12 +79,19 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 - **Ausgleichsplan:** Die Person mit der größten Schuld zahlt an die Person mit dem größten Guthaben, bis alles ausgeglichen ist – höchstens *n − 1* Zahlungen. Vorschläge verändern keine Ausgaben.
 - Beträge werden ausschließlich als ganze Cent (`INT`) gespeichert und berechnet. Die Anteile werden pro Ausgabe gespeichert (`fs_expense_shares`), damit später auch ungleiche Aufteilungen möglich sind.
 
+## PayPal-Zahlungen
+
+- Unter **Teilnehmende** trägt jede Person über „+ PayPal“ ihren PayPal.me-Link ein. Erlaubt sind `paypal.me/name`, `https://www.paypal.me/name`, `paypal.com/paypalme/name`, `@name` oder nur `name`. Gespeichert wird nur der Name.
+- **QR-Code:** In Browsern mit Barcode-Erkennung (z. B. Chrome auf Android) gibt es den Button „QR-Code scannen“: Foto vom PayPal-QR-Code machen, der Link wird eingetragen. Auf dem iPhone den QR-Code mit der Kamera-App scannen und den Link einfügen. QR-Codes, die keinen PayPal.me-Namen enthalten (`paypal.com/qrcodes/…`), werden mit einem Hinweis abgelehnt, weil sich damit kein Betrag vorbelegen lässt.
+- In der **Abrechnung** erscheint bei jeder Zahlung an eine Person mit PayPal.me-Link der Button „PayPal: 30,00 € senden“. Er öffnet `https://www.paypal.me/name/30.00EUR`, also PayPal mit Empfänger und Betrag schon ausgefüllt. Die Zahlung wird in PayPal bestätigt. Danach in FriendSplit „Als bezahlt markieren“. FriendSplit erfährt nicht automatisch, ob die Zahlung durchging.
+- Hat die empfangende Person noch keinen Link hinterlegt, zeigt die App das an. Ist man selbst die empfangende Person, gibt es einen Hinweis zum Hinterlegen.
+
 ## Zugriff, Berechtigungen und Datenschutz
 
 - **Event-Zugang:** Jedes Event hat einen zufälligen Zugangscode aus 12 Zeichen (≈ 60 Bit, ohne verwechselbare Zeichen wie 0/O, 1/I), z. B. `K7Q2-MX9P-4HTR`. Er steht nur im `#`-Teil des Links und landet dadurch nicht in Server-Logs oder Referrern. Jeder Datenbankzugriff ist auf das Event dieses Codes beschränkt.
 - **Personen:** Die Namensauswahl ist **keine sichere Anmeldung**, darauf weist die App sichtbar hin. Ein Gerät merkt sich lokal, wer man ist.
 - **Produktentscheidung für Version 1:** Alle mit dem Link dürfen alle Ausgaben anlegen, ändern und löschen. Ohne echte Anmeldung ließe sich eine Beschränkung auf „eigene“ Ausgaben ohnehin umgehen. Stattdessen gibt es Transparenz: Jede Ausgabe zeigt, wer sie eingetragen und zuletzt geändert hat, und der **Verlauf** protokolliert jede Änderung. Löschungen müssen bestätigt werden.
-- Gespeichert werden nur Anzeigenamen – keine E-Mail-Adressen, Telefonnummern oder Konten.
+- Gespeichert werden nur Anzeigenamen und freiwillig hinterlegte PayPal.me-Namen. Keine E-Mail-Adressen, Telefonnummern oder Bankdaten. Wie alles im Event sind PayPal.me-Namen für alle mit dem Event-Link sichtbar und änderbar, und jede Änderung steht im Verlauf.
 
 ## Zuverlässigkeit
 
@@ -96,6 +111,7 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 | `event` | GET | Gesamtzustand: Event, Teilnehmende, Ausgaben mit Anteilen, Zahlungen, Salden, Plan, Verlauf |
 | `update_event` | POST | Name, Datum, Ort, Notiz ändern |
 | `add_participant` / `rename_participant` / `remove_participant` | POST | Teilnehmende verwalten |
+| `set_paypal` | POST | PayPal.me-Link einer Person setzen (`person_id`, `paypal`; leer = entfernen) |
 | `save_expense` | POST | Ausgabe anlegen (`client_token`) oder ändern (`id` + `version`) |
 | `delete_expense` | POST | Ausgabe löschen (`id` + `version`) |
 | `add_settlement` / `delete_settlement` | POST | Ausgleichszahlung als erledigt markieren bzw. zurücknehmen |

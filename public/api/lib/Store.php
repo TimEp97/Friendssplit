@@ -190,6 +190,50 @@ final class Store
         });
     }
 
+    /**
+     * Hinterlegt den PayPal.me-Namen einer Person (leer = entfernen). Akzeptiert den Namen,
+     * „@name“ oder einen PayPal.me-Link, wie er auch im PayPal-QR-Code steckt.
+     * @param array<string,mixed> $in
+     */
+    public function setPaypal(array $event, array $in, ?string $actor): void
+    {
+        $personId = is_string($in['person_id'] ?? null) ? $in['person_id'] : '';
+        $raw = is_string($in['paypal'] ?? null) ? $this->cleanText($in['paypal']) : '';
+        $handle = null;
+        if ($raw !== '') {
+            $handle = self::normalizePaypal($raw);
+            if ($handle === null) {
+                throw ApiError::validation(['paypal' => str_contains(strtolower($raw), 'paypal.com/qrcodes')
+                    ? 'Dieser QR-Code enthält keinen PayPal.me-Namen. Bitte gib deinen PayPal.me-Link ein, z. B. paypal.me/deinname.'
+                    : 'Bitte gib einen gültigen PayPal.me-Link oder -Namen ein, z. B. paypal.me/deinname.']);
+            }
+        }
+        $this->transaction($event, function () use ($event, $personId, $handle, $actor) {
+            $name = $this->participantName($event['id'], $personId);
+            if ($name === null) {
+                throw new ApiError(404, 'person_not_found', 'Diese Person nimmt nicht (mehr) am Event teil.');
+            }
+            $this->db->prepare('UPDATE fs_persons SET paypal_me = ? WHERE id = ?')->execute([$handle, $personId]);
+            $self = $actor === $personId;
+            $who = $self ? $name : $this->actorName($event, $actor);
+            $this->log($event['id'], $actor, 'paypal_changed', $handle !== null
+                ? sprintf('%s hat %s PayPal.me-Link hinterlegt', $who, $self ? 'den eigenen' : "einen für $name")
+                : sprintf('%s hat %s PayPal.me-Link entfernt', $who, $self ? 'den eigenen' : "den von $name"));
+        });
+    }
+
+    /** PayPal.me-Name aus Eingabe oder Link extrahieren; ungültig → null. */
+    public static function normalizePaypal(string $raw): ?string
+    {
+        $value = trim($raw);
+        if (preg_match('~^(?:https?://)?(?:www\.)?(?:paypal\.me|paypal\.com/(?:[a-z]{2}/)?paypalme)/@?([^/?#\s]+)~i', $value, $m)) {
+            $value = $m[1];
+        } elseif (str_starts_with($value, '@')) {
+            $value = substr($value, 1);
+        }
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/', $value) ? $value : null;
+    }
+
     /** @param array<string,mixed> $in */
     public function removeParticipant(array $event, array $in, ?string $actor): void
     {
@@ -472,7 +516,7 @@ final class Store
                 'created_at' => $this->isoUtc($event['created_at']),
                 'updated_at' => $this->isoUtc($event['updated_at']),
             ],
-            'participants' => array_map(fn ($p) => ['id' => $p['id'], 'name' => $p['name'], 'role' => $p['role']], $participants),
+            'participants' => array_map(fn ($p) => ['id' => $p['id'], 'name' => $p['name'], 'paypal' => $p['paypal'], 'role' => $p['role']], $participants),
             'expenses' => $expenses,
             'settlements' => $settlements,
             'summary' => [
@@ -545,16 +589,18 @@ final class Store
         ];
     }
 
-    /** @return array<int,array{id:string,name:string,role:string,position:int}> */
+    /** @return array<int,array{id:string,name:string,paypal:?string,role:string,position:int}> */
     private function participants(string $eventId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT p.id, p.display_name AS name, ep.role, ep.position
+            'SELECT p.id, p.display_name AS name, p.paypal_me, ep.role, ep.position
              FROM fs_event_participants ep JOIN fs_persons p ON p.id = ep.person_id
              WHERE ep.event_id = ? ORDER BY ep.position, ep.joined_at'
         );
         $stmt->execute([$eventId]);
-        return array_map(fn ($r) => ['id' => $r['id'], 'name' => $r['name'], 'role' => $r['role'], 'position' => (int) $r['position']], $stmt->fetchAll());
+        return array_map(fn ($r) => [
+            'id' => $r['id'], 'name' => $r['name'], 'paypal' => $r['paypal_me'], 'role' => $r['role'], 'position' => (int) $r['position'],
+        ], $stmt->fetchAll());
     }
 
     private function participantName(string $eventId, string $personId): ?string

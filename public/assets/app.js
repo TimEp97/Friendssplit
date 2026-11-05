@@ -57,6 +57,10 @@ const euro = (cents) => euroFormat.format(Math.abs(cents) / 100);
 const signedEuro = (cents) => (cents > 0 ? '+' : cents < 0 ? '−' : '') + euro(cents);
 const amountInput = (cents) => (cents / 100).toFixed(2).replace('.', ',');
 
+/** PayPal.me-Link, der direkt mit dem Betrag in Euro öffnet, z. B. https://www.paypal.me/alex/12.34EUR */
+const paypalLink = (handle, cents) => `https://www.paypal.me/${encodeURIComponent(handle)}${cents ? `/${(cents / 100).toFixed(2)}EUR` : ''}`;
+const canScanQr = () => 'BarcodeDetector' in window;
+
 /** "42,50", "42.5", "1.234,56 €" → Cent als ganze Zahl; ungültig → null */
 function parseAmount(input) {
   let s = String(input ?? '').trim().replace(/[\s€]/g, '');
@@ -189,6 +193,7 @@ const S = {
   form: null, // { token, version, expenseId }
   conflict: null,
   renaming: null,
+  editingPaypal: null,
   editingEvent: false,
   afterPick: null,
 };
@@ -766,9 +771,17 @@ function viewSettle() {
               <p class="payment__text">${avatar(pay.from, personName(pay.from))}
                 <span><strong>${nameFor(pay.from)}</strong> ${pay.from === me ? 'zahlst' : 'zahlt'} <strong>${pay.to === me ? 'dir' : personName(pay.to)}</strong></span>
                 <span class="payment__amount">${euro(pay.amount_cents)}</span></p>
-              <button class="btn btn--small" data-action="settle" data-from="${pay.from}" data-to="${pay.to}" data-amount="${pay.amount_cents}">✓ Als bezahlt markieren</button>
+              <div class="payment__actions">
+                ${person(pay.to)?.paypal
+                  ? html`<a class="btn btn--small btn--paypal ${pay.from === me ? 'btn--primary' : ''}" href="${paypalLink(person(pay.to).paypal, pay.amount_cents)}" target="_blank" rel="noopener noreferrer"
+                      aria-label="${euro(pay.amount_cents)} per PayPal an ${personName(pay.to)} senden">PayPal: ${euro(pay.amount_cents)} senden</a>`
+                  : pay.to === me
+                    ? html`<a class="btn btn--small btn--ghost" href="${eventPath('personen')}">PayPal.me hinterlegen</a>`
+                    : html`<span class="muted small">${personName(pay.to)} hat keinen PayPal.me-Link hinterlegt</span>`}
+                <button class="btn btn--small" data-action="settle" data-from="${pay.from}" data-to="${pay.to}" data-amount="${pay.amount_cents}">✓ Als bezahlt markieren</button>
+              </div>
             </li>`)}</ol>
-            <p class="muted small">Die Vorschläge verändern keine Ausgaben. Als bezahlt markierte Zahlungen fließen in die Salden ein.</p>`}
+            <p class="muted small">Der PayPal-Button öffnet PayPal mit dem Betrag schon eingetragen – du bestätigst die Zahlung dort. Danach hier „Als bezahlt markieren“. Die Vorschläge verändern keine Ausgaben.</p>`}
     </section>
 
     <section aria-labelledby="bal-heading" class="section">
@@ -838,7 +851,21 @@ function viewPeople() {
     <section aria-labelledby="people-heading" class="section">
       <h2 id="people-heading">Teilnehmende (${participants.length})</h2>
       ${participants.length === 0 ? html`<p class="muted">Noch keine Teilnehmenden – füge unten die erste Person hinzu.</p>` : ''}
-      <ul class="list">${participants.map((p) => S.renaming === p.id
+      <ul class="list">${participants.map((p) => S.editingPaypal === p.id
+        ? html`<li class="card"><form id="paypal-form" class="form" data-id="${p.id}" novalidate>
+            <div class="field"><label for="f-paypal">PayPal.me-Link ${p.id === me ? 'von dir' : `von ${p.name}`}</label>
+              <input id="f-paypal" name="paypal" maxlength="200" value="${p.paypal ? `paypal.me/${p.paypal}` : ''}" placeholder="paypal.me/deinname"
+                inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
+              <p class="hint" id="hint-paypal">Link oder Namen von PayPal.me eintragen. Am Ende der Abrechnung können die anderen dir den offenen Betrag dann mit einem Tipp per PayPal senden.
+                ${canScanQr() ? '' : 'Tipp: Deinen PayPal-QR-Code kannst du mit der Kamera-App scannen und den Link hier einfügen.'}</p>
+              <p class="field-error" id="err-paypal"></p></div>
+            <div class="form-actions">
+              ${canScanQr() ? html`<label class="btn">📷 QR-Code scannen<input type="file" id="f-paypal-qr" accept="image/*" capture="environment" class="visually-hidden"></label>` : ''}
+              ${p.paypal ? html`<button class="btn btn--ghost btn--danger-ghost" type="button" data-action="remove-paypal" data-id="${p.id}">Entfernen</button>` : ''}
+              <button class="btn" type="button" data-action="cancel-paypal">Abbrechen</button>
+              <button class="btn btn--primary" type="submit">Speichern</button>
+            </div></form></li>`
+        : S.renaming === p.id
         ? html`<li class="card"><form id="rename-form" class="inline-form" data-id="${p.id}" novalidate>
             <div class="field field--grow"><label for="f-rename">Neuer Name für ${p.name}</label>
               <input id="f-rename" name="name" maxlength="60" value="${p.name}" aria-describedby="err-name"><p class="field-error" id="err-name"></p></div>
@@ -848,7 +875,10 @@ function viewPeople() {
             ${avatar(p.id, p.name)}
             <span class="person-row__name">${p.name}
               ${p.id === me ? html`<span class="badge">Du</span>` : ''}
-              ${p.role === 'organizer' ? html`<span class="badge badge--soft">Organisator:in</span>` : ''}</span>
+              ${p.role === 'organizer' ? html`<span class="badge badge--soft">Organisator:in</span>` : ''}
+              <button class="paypal-chip ${p.paypal ? 'paypal-chip--set' : ''}" data-action="edit-paypal" data-id="${p.id}"
+                aria-label="${p.paypal ? `PayPal.me von ${p.name} ändern (${p.paypal})` : `PayPal.me für ${p.name} hinterlegen`}"
+                title="${p.paypal ? `paypal.me/${p.paypal}` : 'PayPal.me hinterlegen'}">${p.paypal ? '✓ PayPal' : '+ PayPal'}</button></span>
             <span class="muted small person-row__bal">${signedEuro(summary.people[p.id]?.balance ?? 0)}</span>
             <button class="btn-icon" data-action="rename" data-id="${p.id}" aria-label="${p.name} umbenennen" title="Umbenennen">${icon('edit')}</button>
             <button class="btn-icon btn-icon--danger" data-action="remove-person" data-id="${p.id}" aria-label="${p.name} entfernen" title="Entfernen">${icon('trash')}</button>
@@ -1067,7 +1097,13 @@ const actions = {
     const ok = await confirmDialog({ title: 'Zahlung zurücknehmen?', text: 'Die Zahlung gilt danach wieder als offen.', confirm: 'Zurücknehmen' });
     if (ok) await mutate('delete_settlement', { id: el.dataset.id }, { success: 'Zahlung zurückgenommen', button: el });
   },
-  rename: (el) => { S.renaming = el.dataset.id; render(); document.getElementById('f-rename')?.select(); },
+  'edit-paypal': (el) => { S.editingPaypal = el.dataset.id; S.renaming = null; render(); document.getElementById('f-paypal')?.focus(); },
+  'cancel-paypal': () => { S.editingPaypal = null; render(); },
+  'remove-paypal': async (el) => {
+    const result = await mutate('set_paypal', { person_id: el.dataset.id, paypal: '' }, { success: 'PayPal.me-Link entfernt', button: el });
+    if (result) { S.editingPaypal = null; render(); }
+  },
+  rename: (el) => { S.renaming = el.dataset.id; S.editingPaypal = null; render(); document.getElementById('f-rename')?.select(); },
   'cancel-rename': () => { S.renaming = null; render(); },
   'remove-person': async (el) => {
     const p = person(el.dataset.id);
@@ -1199,6 +1235,24 @@ const forms = {
       applyState(result.state);
       render();
       toast('Name geändert');
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields);
+      else toast(error.message, 'error');
+    }
+  },
+
+  'paypal-form': async (form) => {
+    clearErrors(form);
+    const paypal = form.elements.paypal.value.trim();
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      const result = await api('set_paypal', { body: { person_id: form.dataset.id, paypal }, code: S.code });
+      S.editingPaypal = null;
+      applyState(result.state);
+      render();
+      toast(paypal ? 'PayPal.me-Link gespeichert' : 'PayPal.me-Link entfernt');
     } catch (error) {
       setBusy(button, false);
       if (error.fields) showFieldErrors(form, error.fields);
@@ -1347,6 +1401,7 @@ document.addEventListener('input', (event) => {
 
 document.addEventListener('change', (event) => {
   const { id, value } = event.target;
+  if (id === 'f-paypal-qr') { scanPaypalQr(event.target); return; }
   if (id === 'filter-person') { S.filters.person = value; render(); document.getElementById(id)?.focus(); }
   if (id === 'filter-category') { S.filters.category = value; render(); document.getElementById(id)?.focus(); }
   if (event.target.closest('#expense-form')) {
@@ -1365,10 +1420,32 @@ document.addEventListener('toggle', (event) => {
   }
 }, true);
 
+/** Liest den PayPal-QR-Code aus einem Foto (BarcodeDetector, z. B. Chrome auf Android) und trägt den Link ein. */
+async function scanPaypalQr(fileInput) {
+  const file = fileInput.files?.[0];
+  const input = document.getElementById('f-paypal');
+  const err = document.getElementById('err-paypal');
+  if (!file || !input) return;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const codes = await new window.BarcodeDetector({ formats: ['qr_code'] }).detect(bitmap);
+    const value = codes.find((c) => /paypal/i.test(c.rawValue))?.rawValue ?? codes[0]?.rawValue;
+    if (!value) throw new Error('none');
+    input.value = value;
+    err.textContent = '';
+    input.removeAttribute('aria-invalid');
+    toast('QR-Code erkannt – prüfen und speichern');
+  } catch {
+    err.textContent = 'Im Bild wurde kein QR-Code erkannt. Bitte trag deinen PayPal.me-Link von Hand ein.';
+  } finally {
+    fileInput.value = '';
+  }
+}
+
 // Regelmäßig aktualisieren, damit Änderungen anderer ohne Neuladen erscheinen.
 function isBusyEditing() {
   const active = document.activeElement;
-  return S.renaming || S.editingEvent || document.getElementById('dialog').open
+  return S.renaming || S.editingPaypal || S.editingEvent || document.getElementById('dialog').open
     || (active && main.contains(active) && active.matches('input, textarea, select'));
 }
 async function refresh() {

@@ -36,6 +36,21 @@ final class Db
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
             $pdo->exec($statement);
         }
+        // Spalten, die nach Version 1 hinzugekommen sind, in bestehenden Installationen nachrüsten.
+        if (!self::hasColumn($pdo, 'fs_persons', 'paypal_me')) {
+            $pdo->exec('ALTER TABLE fs_persons ADD COLUMN paypal_me ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(40)') . ' NULL');
+        }
+    }
+
+    private static function hasColumn(PDO $pdo, string $table, string $column): bool
+    {
+        if (self::driver($pdo) === 'sqlite') {
+            $columns = array_column($pdo->query("PRAGMA table_info($table)")->fetchAll(), 'name');
+            return in_array($column, $columns, true);
+        }
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?');
+        $stmt->execute([$table, $column]);
+        return (int) $stmt->fetchColumn() > 0;
     }
 
     public static function now(): string

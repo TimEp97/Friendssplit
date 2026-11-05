@@ -65,6 +65,7 @@ try {
         'update_event'       => fn ($in) => $store->updateEvent($event, $in, $actor),
         'add_participant'    => fn ($in) => ['person_id' => $store->addParticipant($event, $in, $actor)],
         'rename_participant' => fn ($in) => $store->renameParticipant($event, $in, $actor),
+        'set_paypal'         => fn ($in) => $store->setPaypal($event, $in, $actor),
         'remove_participant' => fn ($in) => $store->removeParticipant($event, $in, $actor),
         'save_expense'       => fn ($in) => ['expense_id' => $store->saveExpense($event, $in, $actor)],
         'delete_expense'     => fn ($in) => $store->deleteExpense($event, $in, $actor),

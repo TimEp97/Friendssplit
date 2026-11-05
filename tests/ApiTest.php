@@ -81,6 +81,11 @@ function byName(array $state): array
     return array_column($state['participants'], 'id', 'name');
 }
 
+function paypalOf(array $state, string $name): ?string
+{
+    return array_column($state['participants'], 'paypal', 'name')[$name] ?? null;
+}
+
 $code = null;
 $ids = [];
 
@@ -261,6 +266,27 @@ test('Teilnehmende verwalten', function () use (&$code, &$ids) {
     $r = call('remove_participant', ['person_id' => $kim], $code, $ids['Alex']);
     assertSame(200, $r['status']);
     assertSame(3, count($r['body']['data']['state']['participants']));
+});
+
+test('PayPal.me-Links hinterlegen', function () use (&$code, &$ids) {
+    foreach (['https://www.paypal.me/AlexM/12.50EUR?locale.x=de_DE', 'paypal.me/AlexM', '@AlexM', 'AlexM', 'https://www.paypal.com/paypalme/AlexM'] as $input) {
+        $r = call('set_paypal', ['person_id' => $ids['Alex'], 'paypal' => $input], $code, $ids['Alex']);
+        assertSame(200, $r['status'], $input);
+        assertSame('AlexM', paypalOf($r['body']['data']['state'], 'Alex'), $input);
+    }
+    $state = call('event', null, $code)['body']['data'];
+    assertTrue(str_contains($state['activity'][0]['summary'], 'Alex hat den eigenen PayPal.me-Link'));
+    assertSame(null, paypalOf($state, 'Sam'));
+
+    $r = call('set_paypal', ['person_id' => $ids['Sam'], 'paypal' => 'https://www.paypal.com/qrcodes/p2pqrc/ABC'], $code);
+    assertSame(422, $r['status']);
+    assertTrue(str_contains($r['body']['error']['fields']['paypal'], 'QR-Code'));
+    assertSame(422, call('set_paypal', ['person_id' => $ids['Sam'], 'paypal' => 'kein name mit leerzeichen'], $code)['status']);
+    assertSame(404, call('set_paypal', ['person_id' => 'gibtsnicht', 'paypal' => 'x'], $code)['status']);
+
+    $r = call('set_paypal', ['person_id' => $ids['Alex'], 'paypal' => ''], $code);
+    assertSame(null, paypalOf($r['body']['data']['state'], 'Alex'));
+    call('set_paypal', ['person_id' => $ids['Alex'], 'paypal' => 'AlexM'], $code);
 });
 
 test('Zugriff ist auf das eigene Event beschränkt', function () use (&$code, &$ids) {

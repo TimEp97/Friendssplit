@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS fs_events (
 CREATE TABLE IF NOT EXISTS fs_persons (
   id           CHAR(16)    NOT NULL,
   display_name VARCHAR(60) NOT NULL,
+  paypal_me    VARCHAR(40) NULL,
   auth_user_id VARCHAR(64) NULL,
   created_at   DATETIME    NOT NULL,
   PRIMARY KEY (id)
