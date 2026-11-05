@@ -40,6 +40,9 @@ final class Db
         if (!self::hasColumn($pdo, 'fs_persons', 'paypal_me')) {
             $pdo->exec('ALTER TABLE fs_persons ADD COLUMN paypal_me ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(40)') . ' NULL');
         }
+        if (!self::hasColumn($pdo, 'fs_users', 'pending_email')) {
+            $pdo->exec('ALTER TABLE fs_users ADD COLUMN pending_email ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(190)') . ' NULL');
+        }
     }
 
     private static function hasColumn(PDO $pdo, string $table, string $column): bool

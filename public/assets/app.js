@@ -253,6 +253,7 @@ function parseRoute() {
   if (parts[0] === 'passwort-vergessen') return { name: 'forgot' };
   if (parts[0] === 'bestaetigen' && parts[1]) return { name: 'verify', token: parts[1] };
   if (parts[0] === 'passwort-neu' && parts[1]) return { name: 'reset', token: parts[1] };
+  if (parts[0] === 'email-bestaetigen' && parts[1]) return { name: 'verify', token: parts[1], kind: 'email' };
   if (parts[0] === 'profil') return { name: 'profile' };
   if (parts[0] === 'e' && parts[1]) {
     const code = normalizeCode(parts[1]);
@@ -295,7 +296,7 @@ async function onRoute() {
   }
   const previous = S.route;
   S.route = route;
-  if (route.name === 'verify' && previous.token !== route.token) verifyEmail(route.token);
+  if (route.name === 'verify' && previous.token !== route.token) verifyEmail(route.token, route.kind);
   if (route.name !== 'expense') S.form = null;
   if (route.name !== 'personen') { S.renaming = null; S.editingEvent = false; }
 
@@ -624,13 +625,14 @@ function viewForgot() {
     </form>`;
 }
 
-async function verifyEmail(token) {
+async function verifyEmail(token, kind) {
   S.verifying = { state: 'busy' };
   try {
-    const result = await api('verify_email', { body: { token } });
+    const result = await api(kind === 'email' ? 'confirm_email_change' : 'verify_email', { body: { token } });
     S.user = result.user;
     S.notice = null;
     S.verifying = null;
+    if (kind === 'email') { toast(`Deine E-Mail-Adresse ist jetzt ${result.user.email}.`); go('#/profil'); return; }
     toast('E-Mail bestätigt – willkommen bei FriendSplit!');
     go(takeAfterLogin());
   } catch (error) {
@@ -675,6 +677,17 @@ function viewProfile() {
       <div class="profile-head">${avatar(u.id, u.name)}<div><p class="card__title">${u.name}</p><p class="muted small">${u.email}</p></div></div>
     </section>
 
+    <section class="card section" aria-labelledby="name-heading">
+      <h2 id="name-heading">Name</h2>
+      <form id="name-form" class="inline-form" novalidate>
+        <div class="field field--grow"><label for="f-name">Dein Name</label>
+          <input id="f-name" name="name" maxlength="60" value="${u.name}" autocomplete="given-name" aria-describedby="hint-name err-name">
+          <p class="hint" id="hint-name">Gilt für neue Events. In bestehenden Events kannst du deinen Namen unter „Teilnehmende“ ändern.</p>
+          <p class="field-error" id="err-name"></p></div>
+        <button class="btn btn--primary" type="submit">Speichern</button>
+      </form>
+    </section>
+
     <section class="card section" aria-labelledby="paypal-heading">
       <h2 id="paypal-heading">PayPal</h2>
       <form id="profile-form" class="form" novalidate>
@@ -690,6 +703,54 @@ function viewProfile() {
           <button class="btn btn--primary" type="submit">Speichern</button>
         </div>
       </form>
+    </section>
+
+    <section class="card section" aria-labelledby="account-heading">
+      <h2 id="account-heading">Konto</h2>
+      ${u.pending_email ? html`<div class="banner banner--warn" role="status"><span>Neue Adresse <strong>${u.pending_email}</strong> wartet auf Bestätigung – klicke auf den Link in der E-Mail an diese Adresse.</span></div>` : ''}
+
+      <details class="account-box">
+        <summary>E-Mail-Adresse ändern</summary>
+        <form id="email-form" class="form" novalidate>
+          <div class="form-error" role="alert" hidden></div>
+          <div class="field"><label for="f-new-email">Neue E-Mail-Adresse</label>
+            <input id="f-new-email" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="hint-new-email err-email">
+            <p class="hint" id="hint-new-email">Wir schicken einen Bestätigungslink an die neue Adresse. Bis du ihn anklickst, bleibt die bisherige aktiv.</p>
+            <p class="field-error" id="err-email"></p></div>
+          <div class="field"><label for="f-email-pw">Aktuelles Passwort</label>
+            <input id="f-email-pw" name="current_password" type="password" autocomplete="current-password" aria-describedby="err-email-pw">
+            <p class="field-error" id="err-email-pw"></p></div>
+          <div class="form-actions"><button class="btn btn--primary" type="submit">Bestätigungslink senden</button></div>
+        </form>
+      </details>
+
+      <details class="account-box">
+        <summary>Passwort ändern</summary>
+        <form id="password-form" class="form" novalidate>
+          <div class="form-error" role="alert" hidden></div>
+          <div class="field"><label for="f-cur-pw">Aktuelles Passwort</label>
+            <input id="f-cur-pw" name="current_password" type="password" autocomplete="current-password" aria-describedby="err-cur-pw">
+            <p class="field-error" id="err-cur-pw"></p></div>
+          <div class="field"><label for="f-new-pw">Neues Passwort</label>
+            <input id="f-new-pw" name="new_password" type="password" autocomplete="new-password" minlength="8" aria-describedby="hint-new-pw err-new_password">
+            <p class="hint" id="hint-new-pw">Mindestens 8 Zeichen. Andere Geräte werden danach abgemeldet.</p>
+            <p class="field-error" id="err-new_password"></p></div>
+          <div class="form-actions"><button class="btn btn--primary" type="submit">Passwort ändern</button></div>
+        </form>
+      </details>
+
+      <details class="account-box account-box--danger">
+        <summary>Konto löschen</summary>
+        <form id="delete-form" class="form" novalidate>
+          <div class="form-error" role="alert" hidden></div>
+          <p>Dein Konto, deine E-Mail-Adresse, dein Passwort und dein PayPal.me-Link werden endgültig gelöscht.
+            In deinen Events bleibst du mit deinem Namen und deinen Ausgaben als Person ohne Konto stehen, damit die Abrechnung für die anderen stimmt.</p>
+          <div class="field"><label for="f-del-pw">Aktuelles Passwort</label>
+            <input id="f-del-pw" name="current_password" type="password" autocomplete="current-password" aria-describedby="err-del-pw">
+            <p class="field-error" id="err-del-pw"></p></div>
+          <div class="form-actions"><button class="btn btn--danger" type="submit">Konto endgültig löschen</button></div>
+        </form>
+      </details>
     </section>
 
     <button class="btn btn--ghost btn--danger-ghost" data-action="logout">Abmelden</button>`;
@@ -1460,6 +1521,85 @@ const forms = {
       setBusy(button, false);
       if (error.fields) showFieldErrors(form, error.fields);
       else showFormError(form, error.code === 'invalid_token' ? html`${error.message} <a href="#/passwort-vergessen">Neuen Link anfordern</a>` : error.message, []);
+    }
+  },
+
+  'name-form': async (form) => {
+    clearErrors(form);
+    const name = form.elements.name.value.trim();
+    if (!name) return showFieldErrors(form, { name: 'Bitte gib deinen Namen ein.' });
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      S.user = (await api('update_profile', { body: { name } })).user;
+      render();
+      toast('Name gespeichert');
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields);
+      else toast(error.message, 'error');
+    }
+  },
+
+  'email-form': async (form) => {
+    clearErrors(form);
+    const data = Object.fromEntries(new FormData(form));
+    const errors = {};
+    if (!data.email.trim()) errors.email = 'Bitte gib die neue E-Mail-Adresse ein.';
+    if (!data.current_password) errors.current_password = 'Bitte gib dein aktuelles Passwort ein.';
+    if (Object.keys(errors).length) return showFieldErrors(form, errors, { current_password: 'err-email-pw' });
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true, 'Sendet …');
+    try {
+      S.user = (await api('change_email', { body: data })).user;
+      render();
+      toast(`Bestätigungslink an ${data.email.trim()} geschickt`);
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields, { current_password: 'err-email-pw' });
+      else showFormError(form, error.message, []);
+    }
+  },
+
+  'password-form': async (form) => {
+    clearErrors(form);
+    const data = Object.fromEntries(new FormData(form));
+    const errors = {};
+    if (!data.current_password) errors.current_password = 'Bitte gib dein aktuelles Passwort ein.';
+    if (data.new_password.length < 8) errors.new_password = 'Das neue Passwort muss mindestens 8 Zeichen lang sein.';
+    if (Object.keys(errors).length) return showFieldErrors(form, errors, { current_password: 'err-cur-pw' });
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      S.user = (await api('change_password', { body: data })).user;
+      render();
+      toast('Passwort geändert – andere Geräte sind abgemeldet.');
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields, { current_password: 'err-cur-pw' });
+      else showFormError(form, error.message, []);
+    }
+  },
+
+  'delete-form': async (form) => {
+    clearErrors(form);
+    const password = form.elements.current_password.value;
+    if (!password) return showFieldErrors(form, { current_password: 'Bitte gib dein aktuelles Passwort ein.' }, { current_password: 'err-del-pw' });
+    const ok = await confirmDialog({ title: 'Konto wirklich löschen?', text: 'Das kann nicht rückgängig gemacht werden. Du wirst abgemeldet und kannst dich mit dieser E-Mail-Adresse neu registrieren.', confirm: 'Endgültig löschen', danger: true });
+    if (!ok) return;
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true, 'Löscht …');
+    try {
+      await api('delete_account', { body: { current_password: password } });
+      S.user = null;
+      S.data = null; S.code = null; S.dataJson = '';
+      local.remove('fs.lastEvent');
+      go('#/login');
+      toast('Dein Konto wurde gelöscht.');
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields, { current_password: 'err-del-pw' });
+      else showFormError(form, error.message, []);
     }
   },
 

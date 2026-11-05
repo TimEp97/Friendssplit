@@ -83,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_activity_event ON fs_activity (event_id, created_
 CREATE TABLE IF NOT EXISTS fs_users (
   id                TEXT NOT NULL PRIMARY KEY,
   email             TEXT NOT NULL UNIQUE,
+  pending_email     TEXT NULL,
   password_hash     TEXT NOT NULL,
   display_name      TEXT NOT NULL,
   paypal_me         TEXT NULL,

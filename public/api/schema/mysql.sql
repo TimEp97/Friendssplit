@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS fs_activity (
 CREATE TABLE IF NOT EXISTS fs_users (
   id                CHAR(16)     NOT NULL,
   email             VARCHAR(190) NOT NULL,
+  pending_email     VARCHAR(190) NULL,
   password_hash     VARCHAR(255) NOT NULL,
   display_name      VARCHAR(60)  NOT NULL,
   paypal_me         VARCHAR(40)  NULL,

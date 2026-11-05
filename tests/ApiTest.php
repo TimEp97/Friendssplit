@@ -498,6 +498,68 @@ test('Eventdaten bearbeiten und Verlauf', function () use (&$code, &$ids) {
     assertTrue(str_contains($state['activity'][0]['summary'], 'Mathis'));
 });
 
+test('Profil: Name, E-Mail und Passwort ändern', function () use (&$code) {
+    global $sessions;
+    account('Paula');
+    $r = call('update_profile', ['name' => '  Paula P. '], null, 'Paula');
+    assertSame('Paula P.', $r['body']['data']['user']['name']);
+    assertSame(422, call('update_profile', ['name' => ''], null, 'Paula')['status']);
+
+    // E-Mail ändern: Passwort nötig, Bestätigung an neue Adresse, Hinweis an alte
+    $r = call('change_email', ['email' => 'paula.neu@example.test', 'current_password' => 'falsch'], null, 'Paula');
+    assertSame(422, $r['status']);
+    assertTrue(isset($r['body']['error']['fields']['current_password']));
+    $r = call('change_email', ['email' => 'paula.neu@example.test', 'current_password' => 'geheim-Paula-123'], null, 'Paula');
+    assertSame(200, $r['status']);
+    assertSame('paula@example.test', $r['body']['data']['user']['email'], 'gilt erst nach Bestätigung');
+    assertSame('paula.neu@example.test', $r['body']['data']['user']['pending_email']);
+    assertSame('Änderung deiner E-Mail-Adresse', lastMail('paula@example.test')['subject']);
+    $token = tokenFrom(lastMail('paula.neu@example.test'), 'email-bestaetigen');
+    $r = call('confirm_email_change', ['token' => $token], null, 'Paula');
+    assertSame(200, $r['status']);
+    assertSame('paula.neu@example.test', $r['body']['data']['user']['email']);
+    assertSame(null, $r['body']['data']['user']['pending_email']);
+    assertSame(400, call('confirm_email_change', ['token' => $token], null, 'Paula')['status']);
+    assertSame(401, call('login', ['email' => 'paula@example.test', 'password' => 'geheim-Paula-123'], null, null)['status']);
+
+    // Adresse eines anderen Kontos: keine Änderung, keine Auskunft
+    $r = call('change_email', ['email' => 'sam@example.test', 'current_password' => 'geheim-Paula-123'], null, 'Paula');
+    assertSame(200, $r['status']);
+    assertSame('Dein FriendSplit-Konto', lastMail('sam@example.test')['subject']);
+    assertSame('paula.neu@example.test', call('me', null, null, 'Paula')['body']['data']['user']['email']);
+
+    // Passwort ändern meldet andere Sitzungen ab
+    $sessions['Paula2'] = $sessions['Paula'];
+    $r = call('change_password', ['current_password' => 'geheim-Paula-123', 'new_password' => 'kurz'], null, 'Paula');
+    assertSame(422, $r['status']);
+    assertTrue(isset($r['body']['error']['fields']['new_password']));
+    assertSame(200, call('change_password', ['current_password' => 'geheim-Paula-123', 'new_password' => 'neues-paula-pw'], null, 'Paula')['status']);
+    assertSame(200, call('me', null, null, 'Paula')['status'], 'diese Sitzung bleibt');
+    assertSame(401, call('me', null, null, 'Paula2')['status'], 'andere Sitzung beendet');
+});
+
+test('Konto löschen: Person bleibt als Platzhalter im Event', function () use (&$code, &$ids) {
+    account('Lou');
+    $r = call('join_event', [], $code, 'Lou');
+    $lou = $r['body']['data']['person_id'];
+    call('save_expense', [
+        'amount_cents' => 600, 'category' => 'essen', 'paid_by' => $lou,
+        'participants' => [$lou, $ids['Alex']], 'spent_at' => '2026-10-24T01:00',
+    ], $code, 'Lou');
+    assertSame(422, call('delete_account', ['current_password' => 'falsch'], null, 'Lou')['status']);
+    $r = call('delete_account', ['current_password' => 'geheim-Lou-123'], null, 'Lou');
+    assertSame(200, $r['status']);
+    assertSame(401, call('me', null, null, 'Lou')['status']);
+    assertSame(401, call('login', ['email' => 'lou@example.test', 'password' => 'geheim-Lou-123'], null, null)['status']);
+    $state = call('event', null, $code)['body']['data'];
+    $person = array_values(array_filter($state['participants'], fn ($p) => $p['id'] === $lou))[0];
+    assertSame(['Lou', false], [$person['name'], $person['linked']]);
+    assertSame(300, $state['summary']['people'][$lou]['balance'], 'Abrechnung unverändert');
+    // Neues Konto kann den Platzhalter übernehmen
+    account('Lou');
+    assertSame(200, call('claim_person', ['person_id' => $lou], $code, 'Lou')['status']);
+});
+
 test('Methoden und Aktionen', function () use (&$code) {
     global $port, $sessions;
     $raw = file_get_contents("http://127.0.0.1:$port/api/index.php?action=delete_expense", false, stream_context_create(['http' => [

@@ -7,3 +7,7 @@
 --    ist dieser Schritt bereits erledigt.
 
 ALTER TABLE fs_persons ADD COLUMN paypal_me VARCHAR(40) NULL AFTER display_name;
+
+-- 3. Nur falls fs_users schon vor dem Update „Profil bearbeiten“ existierte
+--    (Fehler „Duplicate column name 'pending_email'“ = bereits erledigt):
+ALTER TABLE fs_users ADD COLUMN pending_email VARCHAR(190) NULL AFTER email;

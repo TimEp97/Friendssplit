@@ -485,3 +485,7 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 a.paypal-chip, span.paypal-chip { text-decoration: none; display: inline-block; }
 span.paypal-chip { cursor: default; }
 a.chip { text-decoration: none; }
+.account-box { border-top: 1px solid var(--border); padding: 0.6rem 0; }
+.account-box > summary { font-weight: 650; cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+.account-box[open] > summary { margin-bottom: 0.5rem; }
+.account-box--danger > summary { color: var(--danger); }

@@ -69,6 +69,7 @@ try {
         'logout'                 => function () use ($auth) { $auth->logout(); return []; },
         'request_password_reset' => function ($in) use ($auth) { $auth->requestPasswordReset($in); return ['message' => 'Falls ein Konto zu dieser Adresse existiert, haben wir dir einen Link zum Zurücksetzen geschickt.']; },
         'reset_password'         => fn ($in) => ['user' => $auth->profile($auth->resetPassword($in))],
+        'confirm_email_change'   => fn ($in) => ['user' => $auth->profile($auth->confirmEmailChange($in))],
     ];
     if (isset($public[$action])) {
         requirePost($method);
@@ -80,9 +81,19 @@ try {
     if ($action === 'me') {
         Http::ok(['user' => $auth->profile($user)]);
     }
-    if ($action === 'update_profile') {
+    $account = [
+        'update_profile'  => fn ($in) => $auth->updateProfile($user, $in),
+        'change_email'    => fn ($in) => $auth->requestEmailChange($user, $in),
+        'change_password' => fn ($in) => $auth->changePassword($user, $in),
+        'delete_account'  => function ($in) use ($auth, $user) { $auth->deleteAccount($user, $in); return false; },
+    ];
+    if (isset($account[$action])) {
         requirePost($method);
-        Http::ok(['user' => $auth->profile($auth->updateProfile($user, Http::jsonBody()))]);
+        $result = $account[$action](Http::jsonBody());
+        if ($result === false) {
+            Http::ok(['deleted' => true]);
+        }
+        Http::ok(['user' => $auth->profile($result)]);
     }
     if ($action === 'create_event') {
         requirePost($method);

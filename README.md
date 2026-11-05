@@ -2,7 +2,7 @@
 
 Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen Ausflug, Abend oder ein Event erfasst und fair abrechnet – gedacht zur Einbindung in eine bestehende Webseite bei **ALL-INKL.COM** (oder jedem anderen Webhosting mit PHP und MySQL).
 
-- **Konto mit E-Mail und Passwort:** Registrierung mit Bestätigungslink per E-Mail, „Passwort vergessen“, Profil mit PayPal.me-Link. Alle eigenen Events auf jedem Gerät
+- **Konto mit E-Mail und Passwort:** Registrierung mit Bestätigungslink per E-Mail, „Passwort vergessen“. Im Profil: Name, PayPal.me-Link, E-Mail-Adresse und Passwort ändern, Konto löschen. Alle eigenen Events auf jedem Gerät
 - Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen. Wer den Link öffnet, meldet sich an und wählt seinen Namen (oder tritt neu bei)
 - Ausgaben mit Betrag, Beschreibung, Kategorie (🍹 🍕 🎟️ 🚕 🏨 🛍️), zahlender Person, Beteiligten, Datum und Notiz
 - Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
@@ -93,6 +93,8 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 - **Registrieren:** Name, E-Mail-Adresse und Passwort (mindestens 8 Zeichen). Danach kommt eine E-Mail mit einem Bestätigungslink (48 Stunden gültig). Erst mit bestätigter Adresse kann man sich anmelden. Der Link meldet direkt an und führt zurück zum Event, falls man über einen Event-Link gekommen ist.
 - **Anmelden:** E-Mail und Passwort. Die Sitzung hält 30 Tage.
 - **Passwort vergessen:** Link per E-Mail (60 Minuten gültig, nur einmal nutzbar). Ein neues Passwort meldet alle anderen Geräte ab.
+- **Profil:** Name (gilt für neue Events), PayPal.me-Link, E-Mail-Adresse ändern (Bestätigungslink an die neue Adresse, Hinweis an die alte, bis zur Bestätigung bleibt die alte aktiv), Passwort ändern (meldet andere Geräte ab). Für Änderungen an E-Mail, Passwort und zum Löschen ist das aktuelle Passwort nötig.
+- **Konto löschen:** Entfernt Konto, E-Mail-Adresse, Passwort, PayPal.me-Link und alle Sitzungen endgültig. In Events bleibt die Person mit ihrem Namen und ihren Ausgaben als Platzhalter ohne Konto stehen, damit die Abrechnung der anderen stimmt. Wer sich neu registriert, kann den Namen wieder übernehmen.
 - **Pflicht für alles:** Ohne Anmeldung zeigt die App nur Login und Registrierung. Events anlegen, beitreten und Ausgaben eintragen geht nur mit bestätigtem Konto.
 - **Event beitreten:** Wer den Link öffnet und angemeldet ist, wählt einen noch freien Namen aus der Liste (z. B. „Sam“, vom Organisator angelegt) oder tritt mit neuem Namen bei. Personen ohne Konto bleiben als Platzhalter möglich, damit man schon Ausgaben für sie eintragen kann.
 - **Sicherheit:** Passwörter nur als `password_hash()`. Sitzungs- und E-Mail-Tokens nur als SHA-256-Hash in der Datenbank. Das Sitzungs-Cookie ist `HttpOnly`, `SameSite=Lax` und über HTTPS `Secure`. Jede POST-Anfrage braucht den Header `X-Requested-With: FriendSplit` (Schutz vor CSRF). Anmeldeversuche und E-Mails sind begrenzt (z. B. 10 Fehlversuche pro Adresse in 15 Minuten). Die App verrät nicht, ob ein Konto zu einer E-Mail-Adresse existiert.
@@ -129,7 +131,9 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 | `register` / `verify_email` / `resend_verification` | POST | Konto anlegen, E-Mail bestätigen (meldet an), Link erneut senden |
 | `login` / `logout` | POST | An- und Abmelden |
 | `request_password_reset` / `reset_password` | POST | Link anfordern, neues Passwort setzen (meldet an) |
-| `me` / `update_profile` | GET / POST | Eigenes Profil mit Events lesen, PayPal.me-Link ändern |
+| `me` / `update_profile` | GET / POST | Eigenes Profil mit Events lesen, Name und PayPal.me-Link ändern |
+| `change_email` / `confirm_email_change` | POST | Neue E-Mail-Adresse anfordern (mit Passwort) und per Link bestätigen |
+| `change_password` / `delete_account` | POST | Passwort ändern bzw. Konto löschen (jeweils mit aktuellem Passwort) |
 | `create_event` | POST | Event mit Teilnehmenden anlegen → `code`, `person_id` |
 | `join_event` / `claim_person` / `release_person` | POST | Beitreten (neuer Name / freien Namen übernehmen), Verknüpfung lösen |
 | `event` | GET | Gesamtzustand: Event, Teilnehmende, Ausgaben mit Anteilen, Zahlungen, Salden, Plan, Verlauf |
@@ -144,4 +148,4 @@ Jede Änderung antwortet mit dem neuen Gesamtzustand. Fehler kommen als `{ ok: f
 
 ## Mögliche Erweiterungen
 
-Individuelle bzw. ungleiche Anteile (das Datenmodell ist vorbereitet), Export als CSV/PDF, mehrere Währungen, Belegfotos, Namen und E-Mail-Adresse im Profil ändern, Konto löschen, Einladen per E-Mail, Echtzeit-Updates per Server-Sent Events.
+Individuelle bzw. ungleiche Anteile (das Datenmodell ist vorbereitet), Export als CSV/PDF, mehrere Währungen, Belegfotos, Einladen per E-Mail, Datenexport fürs eigene Konto, Echtzeit-Updates per Server-Sent Events.

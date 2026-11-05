@@ -97,12 +97,7 @@ final class Auth
         $errors = [];
         $email = $this->email($in, $errors);
         $password = $this->password($in, $errors);
-        $name = is_string($in['name'] ?? null) ? trim((string) preg_replace('/[\x00-\x1F\x7F]/u', '', $in['name'])) : '';
-        if ($name === '') {
-            $errors['name'] = 'Bitte gib deinen Namen ein.';
-        } elseif (mb_strlen($name) > 60) {
-            $errors['name'] = 'Höchstens 60 Zeichen erlaubt.';
-        }
+        $name = $this->name($in, $errors);
         if ($errors) {
             throw ApiError::validation($errors);
         }
@@ -269,13 +264,169 @@ final class Auth
      */
     public function updateProfile(array $user, array $in): array
     {
-        $raw = is_string($in['paypal'] ?? null) ? trim($in['paypal']) : '';
-        $handle = null;
-        if ($raw !== '') {
-            $handle = Store::normalizePaypal($raw) ?? throw ApiError::validation(['paypal' => Store::paypalError($raw)]);
+        $errors = [];
+        $name = $user['display_name'];
+        if (array_key_exists('name', $in)) {
+            $name = $this->name($in, $errors);
         }
-        $this->db->prepare('UPDATE fs_users SET paypal_me = ?, updated_at = ? WHERE id = ?')->execute([$handle, Db::now(), $user['id']]);
+        $handle = $user['paypal_me'];
+        if (array_key_exists('paypal', $in)) {
+            $raw = is_string($in['paypal']) ? trim($in['paypal']) : '';
+            $handle = null;
+            if ($raw !== '') {
+                $handle = Store::normalizePaypal($raw);
+                if ($handle === null) {
+                    $errors['paypal'] = Store::paypalError($raw);
+                }
+            }
+        }
+        if ($errors) {
+            throw ApiError::validation($errors);
+        }
+        // Der Name gilt für neue Events. In bestehenden Events bleibt der dort verwendete Name.
+        $this->db->prepare('UPDATE fs_users SET display_name = ?, paypal_me = ?, updated_at = ? WHERE id = ?')
+            ->execute([$name, $handle, Db::now(), $user['id']]);
         return $this->userById($user['id']);
+    }
+
+    /**
+     * Neue E-Mail-Adresse anfordern: Bestätigungslink an die neue Adresse, Hinweis an die alte.
+     * Die Adresse ändert sich erst nach dem Klick auf den Link.
+     * @param array<string,mixed> $user
+     * @param array<string,mixed> $in
+     */
+    public function requestEmailChange(array $user, array $in): array
+    {
+        $errors = [];
+        $email = $this->email($in, $errors);
+        if (!$errors && $email === $user['email']) {
+            $errors['email'] = 'Das ist bereits deine E-Mail-Adresse.';
+        }
+        $this->checkPassword($user, $in, $errors);
+        if ($errors) {
+            throw ApiError::validation($errors);
+        }
+        $this->limit('mail:' . $email, 5, 3600, 'Für diese E-Mail-Adresse wurden gerade viele E-Mails verschickt. Bitte warte etwas und versuche es später noch einmal.');
+        $this->db->prepare("DELETE FROM fs_user_tokens WHERE user_id = ? AND purpose = 'email'")->execute([$user['id']]);
+        $this->db->prepare('UPDATE fs_users SET pending_email = ?, updated_at = ? WHERE id = ?')->execute([$email, Db::now(), $user['id']]);
+        if ($this->userByEmail($email) !== null) {
+            // Adresse gehört schon zu einem Konto: nichts verraten, nur das andere Postfach informieren.
+            $this->mailer->send($email, 'Dein FriendSplit-Konto', "Hallo,\n\n"
+                . "jemand wollte gerade diese E-Mail-Adresse für ein anderes FriendSplit-Konto verwenden. "
+                . "Sie gehört aber schon zu deinem Konto. Es wurde nichts geändert.\n");
+            return $this->userById($user['id']);
+        }
+        $token = $this->createToken($user['id'], 'email', self::VERIFY_HOURS * 3600);
+        $this->mailer->send($email, 'Bitte bestätige deine neue E-Mail-Adresse', "Hallo {$user['display_name']},\n\n"
+            . "bitte bestätige deine neue E-Mail-Adresse für FriendSplit mit diesem Link:\n\n"
+            . $this->link('email-bestaetigen/' . $token) . "\n\n"
+            . 'Der Link ist ' . self::VERIFY_HOURS . " Stunden gültig. Bis dahin bleibt deine bisherige Adresse aktiv.\n");
+        $this->mailer->send($user['email'], 'Änderung deiner E-Mail-Adresse', "Hallo {$user['display_name']},\n\n"
+            . "für dein FriendSplit-Konto wurde eine neue E-Mail-Adresse angefordert ($email). Sie gilt erst, wenn der Link "
+            . "in der E-Mail an die neue Adresse bestätigt wird.\n\n"
+            . "Warst du das nicht? Dann setze bitte dein Passwort zurück: {$this->link('passwort-vergessen')}\n");
+        return $this->userById($user['id']);
+    }
+
+    /**
+     * @param array<string,mixed> $in
+     * @return array<string,mixed>
+     */
+    public function confirmEmailChange(array $in): array
+    {
+        $user = $this->consumeToken($in, 'email', 'Dieser Link ist ungültig oder abgelaufen. Bitte fordere die Änderung im Profil erneut an.');
+        $email = $user['pending_email'];
+        if ($email === null) {
+            throw new ApiError(400, 'invalid_token', 'Dieser Link ist ungültig oder abgelaufen. Bitte fordere die Änderung im Profil erneut an.');
+        }
+        try {
+            $this->db->prepare('UPDATE fs_users SET email = ?, pending_email = NULL, email_verified_at = COALESCE(email_verified_at, ?), updated_at = ? WHERE id = ?')
+                ->execute([$email, Db::now(), Db::now(), $user['id']]);
+        } catch (PDOException) {
+            throw new ApiError(409, 'email_taken', 'Diese E-Mail-Adresse wird inzwischen von einem anderen Konto verwendet.');
+        }
+        // Wer den Link auf einem Gerät ohne Anmeldung öffnet, ist danach dort angemeldet.
+        if (($this->currentUser()['id'] ?? null) !== $user['id']) {
+            $this->startSession($user['id']);
+        }
+        return $this->userById($user['id']);
+    }
+
+    /**
+     * Passwort ändern (aktuelles Passwort nötig). Andere Geräte werden abgemeldet.
+     * @param array<string,mixed> $user
+     * @param array<string,mixed> $in
+     */
+    public function changePassword(array $user, array $in): array
+    {
+        $errors = [];
+        $this->checkPassword($user, $in, $errors);
+        $newErrors = [];
+        $new = $this->password(['password' => $in['new_password'] ?? null], $newErrors);
+        if (isset($newErrors['password'])) {
+            $errors['new_password'] = $newErrors['password'];
+        }
+        if ($errors) {
+            throw ApiError::validation($errors);
+        }
+        $this->db->prepare('UPDATE fs_users SET password_hash = ?, updated_at = ? WHERE id = ?')
+            ->execute([password_hash($new, PASSWORD_DEFAULT), Db::now(), $user['id']]);
+        $this->db->prepare('DELETE FROM fs_sessions WHERE user_id = ?')->execute([$user['id']]);
+        $this->startSession($user['id']);
+        return $this->userById($user['id']);
+    }
+
+    /**
+     * Konto endgültig löschen (aktuelles Passwort nötig). Die Personen in Events bleiben als
+     * Platzhalter mit ihrem Namen erhalten, damit die Abrechnungen der anderen stimmen.
+     * @param array<string,mixed> $user
+     * @param array<string,mixed> $in
+     */
+    public function deleteAccount(array $user, array $in): void
+    {
+        $errors = [];
+        $this->checkPassword($user, $in, $errors);
+        if ($errors) {
+            throw ApiError::validation($errors);
+        }
+        $this->db->beginTransaction();
+        try {
+            $this->db->prepare('UPDATE fs_persons SET auth_user_id = NULL WHERE auth_user_id = ?')->execute([$user['id']]);
+            $this->db->prepare('DELETE FROM fs_sessions WHERE user_id = ?')->execute([$user['id']]);
+            $this->db->prepare('DELETE FROM fs_user_tokens WHERE user_id = ?')->execute([$user['id']]);
+            $this->db->prepare('DELETE FROM fs_users WHERE id = ?')->execute([$user['id']]);
+            $this->db->commit();
+        } catch (Throwable $e) {
+            $this->db->rollBack();
+            throw $e;
+        }
+        $this->setCookie('', time() - 3600);
+    }
+
+    /** @param array<string,string> $errors */
+    private function checkPassword(array $user, array $in, array &$errors): void
+    {
+        $password = is_string($in['current_password'] ?? null) ? $in['current_password'] : '';
+        if ($password === '') {
+            $errors['current_password'] = 'Bitte gib dein aktuelles Passwort ein.';
+            return;
+        }
+        $this->limit('login:' . $user['email'], 10, 900, 'Zu viele Versuche. Bitte warte 15 Minuten.');
+        if (!password_verify($password, $user['password_hash'])) {
+            $errors['current_password'] = 'Das Passwort ist falsch.';
+        }
+    }
+
+    /** @param array<string,string> $errors */
+    private function name(array $in, array &$errors): string
+    {
+        $name = is_string($in['name'] ?? null) ? trim((string) preg_replace('/[\x00-\x1F\x7F]/u', '', $in['name'])) : '';
+        if ($name === '') {
+            $errors['name'] = 'Bitte gib deinen Namen ein.';
+        } elseif (mb_strlen($name) > 60) {
+            $errors['name'] = 'Höchstens 60 Zeichen erlaubt.';
+        }
+        return $name;
     }
 
     /**
@@ -297,6 +448,7 @@ final class Auth
         return [
             'id' => $user['id'],
             'email' => $user['email'],
+            'pending_email' => $user['pending_email'] ?? null,
             'name' => $user['display_name'],
             'paypal' => $user['paypal_me'],
             'events' => array_map(fn ($r) => [
