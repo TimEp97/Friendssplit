@@ -2,10 +2,11 @@
 
 Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen Ausflug, Abend oder ein Event erfasst und fair abrechnet – gedacht zur Einbindung in eine bestehende Webseite bei **ALL-INKL.COM** (oder jedem anderen Webhosting mit PHP und MySQL).
 
-- Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen
+- **Konto mit E-Mail und Passwort:** Registrierung mit Bestätigungslink per E-Mail, „Passwort vergessen“, Profil mit PayPal.me-Link. Alle eigenen Events auf jedem Gerät
+- Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen. Wer den Link öffnet, meldet sich an und wählt seinen Namen (oder tritt neu bei)
 - Ausgaben mit Betrag, Beschreibung, Kategorie (🍹 🍕 🎟️ 🚕 🏨 🛍️), zahlender Person, Beteiligten, Datum und Notiz
 - Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
-- **PayPal:** Jede Person kann ihren PayPal.me-Link hinterlegen (eintippen, einfügen oder den PayPal-QR-Code scannen). In der Abrechnung öffnet ein Button PayPal direkt mit dem richtigen Betrag
+- **PayPal:** Jede Person hinterlegt ihren PayPal.me-Link einmal im Profil (eintippen, einfügen oder den PayPal-QR-Code scannen). In der Abrechnung öffnet ein Button PayPal direkt mit dem richtigen Betrag
 - Zahlungen als erledigt markieren (und zurücknehmen), Verlauf aller Änderungen
 - Alle Daten zentral in MySQL; Änderungen anderer erscheinen automatisch (Aktualisierung alle 15 s und beim Zurückkehren in den Tab)
 
@@ -27,7 +28,7 @@ public/                  ← dieser Ordner kommt auf den Webspace
 ├── api/
 │   ├── index.php        JSON-API (einziger öffentlicher PHP-Einstieg)
 │   ├── config.sample.php
-│   ├── lib/             Split.php (Berechnung), Store.php (Datenbank/Regeln), …  – per .htaccess gesperrt
+│   ├── lib/             Split.php (Berechnung), Store.php (Events), Auth.php (Konten), Mailer.php  – per .htaccess gesperrt
 │   └── schema/          mysql.sql, sqlite.sql                                   – per .htaccess gesperrt
 └── data/                nur für SQLite in der Entwicklung                         – per .htaccess gesperrt
 tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end)
@@ -37,12 +38,16 @@ tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end
 
 1. **Datenbank anlegen:** KAS → *Datenbanken* → *Neue Datenbank*. Datenbankname, Benutzer und Passwort notieren (z. B. `d0123456`).
 2. **Dateien hochladen:** Den Inhalt von `public/` per FTP in einen Unterordner deiner Webseite laden, z. B. `/friendsplit/`.
-3. **Konfiguration:** `api/config.sample.php` nach `api/config.php` kopieren und Zugangsdaten eintragen:
+3. **Konfiguration:** `api/config.sample.php` nach `api/config.php` kopieren und eintragen:
    ```php
    'dsn'      => 'mysql:host=localhost;dbname=d0123456;charset=utf8mb4',
    'user'     => 'd0123456',
    'password' => '…',
+   // …
+   'app_url'  => 'https://deine-domain.de/friendsplit/',   // für die Links in den E-Mails
+   'mail'     => ['transport' => 'mail', 'from' => 'noreply@deine-domain.de', 'from_name' => 'FriendSplit'],
    ```
+   **E-Mail bei ALL-INKL:** Der Versand läuft über PHPs `mail()` und braucht keine weitere Einrichtung. Die Absenderadresse (`from`) muss aber zu deiner Domain gehören. Lege sie im KAS unter *E-Mail* als Postfach oder Weiterleitung an, sonst landen die Mails eher im Spam. `app_url` ist Pflicht: Ohne sie verschickt die App keine Bestätigungs- oder Passwort-Links.
 4. **Tabellen anlegen** – eine der beiden Varianten:
    - phpMyAdmin öffnen (KAS → Datenbanken → phpMyAdmin), Datenbank wählen, *Importieren* → `api/schema/mysql.sql`.
    - Oder in `config.php` einen langen Zufallswert als `setup_key` eintragen und einmal  
@@ -54,8 +59,10 @@ tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end
 
 Neue Dateien per FTP hochladen (deine `api/config.php` bleibt unverändert). Danach die Datenbank einmal nachrüsten:
 
-- `setup_key` in `config.php` setzen und `…/api/index.php?action=setup&key=DEIN_SETUP_KEY` aufrufen. Das ergänzt fehlende Spalten automatisch.
-- Oder in phpMyAdmin `api/schema/upgrade-paypal.sql` importieren.
+- `setup_key` in `config.php` setzen und `…/api/index.php?action=setup&key=DEIN_SETUP_KEY` aufrufen. Das legt neue Tabellen an und ergänzt fehlende Spalten automatisch.
+- Oder in phpMyAdmin erst `api/schema/mysql.sql` und dann `api/schema/upgrade.sql` importieren.
+
+Außerdem `app_url` und `mail` in `config.php` ergänzen (siehe `config.sample.php`). Nach dem Update muss sich jede Person einmal registrieren. Bestehende Events bleiben erhalten: Wer den Event-Link öffnet, wählt seinen bisherigen Namen und übernimmt ihn damit samt aller Ausgaben ins eigene Konto.
 
 Alle Tabellen haben das Präfix `fs_`, damit sie neben bestehenden Tabellen in derselben Datenbank liegen können.
 
@@ -63,7 +70,9 @@ Alle Tabellen haben das Präfix `fs_`, damit sie neben bestehenden Tabellen in d
 
 ```bash
 cp public/api/config.sample.php public/api/config.php
-# in config.php die SQLite-Zeile aktivieren und 'auto_migrate' => true setzen
+# in config.php die SQLite-Zeile aktivieren, 'auto_migrate' => true setzen,
+# 'app_url' => 'http://localhost:8000/' und bei 'mail' 'transport' => 'log' –
+# dann stehen Bestätigungs-Mails in public/data/mail.log statt im Postfach
 php -S localhost:8000 -t public
 # → http://localhost:8000
 
@@ -79,19 +88,29 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 - **Ausgleichsplan:** Die Person mit der größten Schuld zahlt an die Person mit dem größten Guthaben, bis alles ausgeglichen ist – höchstens *n − 1* Zahlungen. Vorschläge verändern keine Ausgaben.
 - Beträge werden ausschließlich als ganze Cent (`INT`) gespeichert und berechnet. Die Anteile werden pro Ausgabe gespeichert (`fs_expense_shares`), damit später auch ungleiche Aufteilungen möglich sind.
 
+## Konten und Anmeldung
+
+- **Registrieren:** Name, E-Mail-Adresse und Passwort (mindestens 8 Zeichen). Danach kommt eine E-Mail mit einem Bestätigungslink (48 Stunden gültig). Erst mit bestätigter Adresse kann man sich anmelden. Der Link meldet direkt an und führt zurück zum Event, falls man über einen Event-Link gekommen ist.
+- **Anmelden:** E-Mail und Passwort. Die Sitzung hält 30 Tage.
+- **Passwort vergessen:** Link per E-Mail (60 Minuten gültig, nur einmal nutzbar). Ein neues Passwort meldet alle anderen Geräte ab.
+- **Pflicht für alles:** Ohne Anmeldung zeigt die App nur Login und Registrierung. Events anlegen, beitreten und Ausgaben eintragen geht nur mit bestätigtem Konto.
+- **Event beitreten:** Wer den Link öffnet und angemeldet ist, wählt einen noch freien Namen aus der Liste (z. B. „Sam“, vom Organisator angelegt) oder tritt mit neuem Namen bei. Personen ohne Konto bleiben als Platzhalter möglich, damit man schon Ausgaben für sie eintragen kann.
+- **Sicherheit:** Passwörter nur als `password_hash()`. Sitzungs- und E-Mail-Tokens nur als SHA-256-Hash in der Datenbank. Das Sitzungs-Cookie ist `HttpOnly`, `SameSite=Lax` und über HTTPS `Secure`. Jede POST-Anfrage braucht den Header `X-Requested-With: FriendSplit` (Schutz vor CSRF). Anmeldeversuche und E-Mails sind begrenzt (z. B. 10 Fehlversuche pro Adresse in 15 Minuten). Die App verrät nicht, ob ein Konto zu einer E-Mail-Adresse existiert.
+
 ## PayPal-Zahlungen
 
-- Unter **Teilnehmende** trägt jede Person über „+ PayPal“ ihren PayPal.me-Link ein. Erlaubt sind `paypal.me/name`, `https://www.paypal.me/name`, `paypal.com/paypalme/name`, `@name` oder nur `name`. Gespeichert wird nur der Name.
+- Im **Profil** trägt jede Person ihren PayPal.me-Link ein. Er gilt automatisch in allen ihren Events. Für Platzhalter ohne Konto kann man den Link unter **Teilnehmende** über „+ PayPal“ hinterlegen. Erlaubt sind `paypal.me/name`, `https://www.paypal.me/name`, `paypal.com/paypalme/name`, `@name` oder nur `name`. Gespeichert wird nur der Name.
 - **QR-Code:** In Browsern mit Barcode-Erkennung (z. B. Chrome auf Android) gibt es den Button „QR-Code scannen“: Foto vom PayPal-QR-Code machen, der Link wird eingetragen. Auf dem iPhone den QR-Code mit der Kamera-App scannen und den Link einfügen. QR-Codes, die keinen PayPal.me-Namen enthalten (`paypal.com/qrcodes/…`), werden mit einem Hinweis abgelehnt, weil sich damit kein Betrag vorbelegen lässt.
 - In der **Abrechnung** erscheint bei jeder Zahlung an eine Person mit PayPal.me-Link der Button „PayPal: 30,00 € senden“. Er öffnet `https://www.paypal.me/name/30.00EUR`, also PayPal mit Empfänger und Betrag schon ausgefüllt. Die Zahlung wird in PayPal bestätigt. Danach in FriendSplit „Als bezahlt markieren“. FriendSplit erfährt nicht automatisch, ob die Zahlung durchging.
 - Hat die empfangende Person noch keinen Link hinterlegt, zeigt die App das an. Ist man selbst die empfangende Person, gibt es einen Hinweis zum Hinterlegen.
 
 ## Zugriff, Berechtigungen und Datenschutz
 
+- **Anmeldung:** Siehe *Konten und Anmeldung*. Änderungen in einem Event darf nur, wer daran teilnimmt.
 - **Event-Zugang:** Jedes Event hat einen zufälligen Zugangscode aus 12 Zeichen (≈ 60 Bit, ohne verwechselbare Zeichen wie 0/O, 1/I), z. B. `K7Q2-MX9P-4HTR`. Er steht nur im `#`-Teil des Links und landet dadurch nicht in Server-Logs oder Referrern. Jeder Datenbankzugriff ist auf das Event dieses Codes beschränkt.
-- **Personen:** Die Namensauswahl ist **keine sichere Anmeldung**, darauf weist die App sichtbar hin. Ein Gerät merkt sich lokal, wer man ist.
-- **Produktentscheidung für Version 1:** Alle mit dem Link dürfen alle Ausgaben anlegen, ändern und löschen. Ohne echte Anmeldung ließe sich eine Beschränkung auf „eigene“ Ausgaben ohnehin umgehen. Stattdessen gibt es Transparenz: Jede Ausgabe zeigt, wer sie eingetragen und zuletzt geändert hat, und der **Verlauf** protokolliert jede Änderung. Löschungen müssen bestätigt werden.
-- Gespeichert werden nur Anzeigenamen und freiwillig hinterlegte PayPal.me-Namen. Keine E-Mail-Adressen, Telefonnummern oder Bankdaten. Wie alles im Event sind PayPal.me-Namen für alle mit dem Event-Link sichtbar und änderbar, und jede Änderung steht im Verlauf.
+- **Personen:** Wer man in einem Event ist, ergibt sich aus dem Konto. Die Verknüpfung lässt sich unter *Teilnehmende* lösen („anderen Namen wählen“), falls man sich vertippt hat.
+- **Rechte im Event:** Alle Teilnehmenden dürfen alle Ausgaben anlegen, ändern und löschen. Dafür gibt es Transparenz: Jede Ausgabe zeigt, wer sie eingetragen und zuletzt geändert hat, und der **Verlauf** protokolliert jede Änderung. Löschungen müssen bestätigt werden.
+- Gespeichert werden Name, E-Mail-Adresse und Passwort-Hash des Kontos sowie freiwillig der PayPal.me-Name. Keine Telefonnummern oder Bankdaten. Die E-Mail-Adresse sehen andere Teilnehmende nicht. Der PayPal.me-Name ist für die Teilnehmenden deiner Events sichtbar.
 
 ## Zuverlässigkeit
 
@@ -103,15 +122,20 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 
 ## API (Kurzüberblick)
 
-`api/index.php?action=…`, JSON. Event-Zugriff über den Header `X-Event-Code`, die aktuelle Person über `X-Person-Id`.
+`api/index.php?action=…`, JSON. Anmeldung über das Sitzungs-Cookie, Event-Zugriff über den Header `X-Event-Code`. POST-Anfragen brauchen `X-Requested-With: FriendSplit`.
 
 | Aktion | Methode | Zweck |
 |---|---|---|
+| `register` / `verify_email` / `resend_verification` | POST | Konto anlegen, E-Mail bestätigen (meldet an), Link erneut senden |
+| `login` / `logout` | POST | An- und Abmelden |
+| `request_password_reset` / `reset_password` | POST | Link anfordern, neues Passwort setzen (meldet an) |
+| `me` / `update_profile` | GET / POST | Eigenes Profil mit Events lesen, PayPal.me-Link ändern |
 | `create_event` | POST | Event mit Teilnehmenden anlegen → `code`, `person_id` |
+| `join_event` / `claim_person` / `release_person` | POST | Beitreten (neuer Name / freien Namen übernehmen), Verknüpfung lösen |
 | `event` | GET | Gesamtzustand: Event, Teilnehmende, Ausgaben mit Anteilen, Zahlungen, Salden, Plan, Verlauf |
 | `update_event` | POST | Name, Datum, Ort, Notiz ändern |
 | `add_participant` / `rename_participant` / `remove_participant` | POST | Teilnehmende verwalten |
-| `set_paypal` | POST | PayPal.me-Link einer Person setzen (`person_id`, `paypal`; leer = entfernen) |
+| `set_paypal` | POST | PayPal.me-Link eines Platzhalters ohne Konto setzen (`person_id`, `paypal`; leer = entfernen) |
 | `save_expense` | POST | Ausgabe anlegen (`client_token`) oder ändern (`id` + `version`) |
 | `delete_expense` | POST | Ausgabe löschen (`id` + `version`) |
 | `add_settlement` / `delete_settlement` | POST | Ausgleichszahlung als erledigt markieren bzw. zurücknehmen |
@@ -120,4 +144,4 @@ Jede Änderung antwortet mit dem neuen Gesamtzustand. Fehler kommen als `{ ok: f
 
 ## Mögliche Erweiterungen
 
-Individuelle bzw. ungleiche Anteile (das Datenmodell ist vorbereitet), Export als CSV/PDF, mehrere Währungen, Belegfotos, persönliche PINs oder echte Benutzerkonten (`fs_persons.auth_user_id` ist vorgesehen), Echtzeit-Updates per Server-Sent Events.
+Individuelle bzw. ungleiche Anteile (das Datenmodell ist vorbereitet), Export als CSV/PDF, mehrere Währungen, Belegfotos, Namen und E-Mail-Adresse im Profil ändern, Konto löschen, Einladen per E-Mail, Echtzeit-Updates per Server-Sent Events.

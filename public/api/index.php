@@ -5,14 +5,17 @@ declare(strict_types=1);
  * FriendSplit – JSON-API
  *
  * Aufruf: api/index.php?action=<name>
+ * Anmeldung: Sitzungs-Cookie (HttpOnly) nach Login mit E-Mail und Passwort
  * Event-Zugriff: Header "X-Event-Code" (geheimer Zugangscode aus dem Event-Link)
- * Aktuelle Person: Header "X-Person-Id" (nur zur Zuordnung, keine sichere Anmeldung)
+ * Schutz vor CSRF: Jede POST-Anfrage muss den Header "X-Requested-With: FriendSplit" tragen.
  */
 
 require __DIR__ . '/lib/Http.php';
 require __DIR__ . '/lib/Db.php';
 require __DIR__ . '/lib/Split.php';
 require __DIR__ . '/lib/Store.php';
+require __DIR__ . '/lib/Mailer.php';
+require __DIR__ . '/lib/Auth.php';
 
 ini_set('display_errors', '0');
 
@@ -46,19 +49,67 @@ try {
         Http::ok(['message' => 'Datenbanktabellen sind eingerichtet.']);
     }
 
-    $store = new Store($pdo);
+    if ($method === 'POST' && Http::header('X-Requested-With') !== 'FriendSplit') {
+        throw new ApiError(403, 'csrf', 'Die Anfrage wurde aus Sicherheitsgründen abgelehnt. Bitte lade die Seite neu.');
+    }
 
+    $store = new Store($pdo);
+    $https = ($_SERVER['HTTPS'] ?? '') !== '' && ($_SERVER['HTTPS'] ?? '') !== 'off'
+        || strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '')) === 'https';
+    // Cookie gilt für den App-Ordner, z. B. /friendsplit/ bei /friendsplit/api/index.php
+    $cookiePath = rtrim(str_replace('\\', '/', dirname((string) ($_SERVER['SCRIPT_NAME'] ?? '/api/index.php'), 2)), '/') . '/';
+    $auth = new Auth($pdo, new Mailer($config['mail'] ?? []), (string) ($config['app_url'] ?? ''), $cookiePath, $https, (string) ($_SERVER['REMOTE_ADDR'] ?? ''));
+
+    // Aktionen ohne Anmeldung
+    $public = [
+        'register'               => function ($in) use ($auth) { $auth->register($in); return ['message' => 'Fast geschafft! Wir haben dir eine E-Mail mit einem Bestätigungslink geschickt.']; },
+        'resend_verification'    => function ($in) use ($auth) { $auth->resendVerification($in); return ['message' => 'Falls ein unbestätigtes Konto zu dieser Adresse existiert, haben wir einen neuen Bestätigungslink geschickt.']; },
+        'verify_email'           => fn ($in) => ['user' => $auth->profile($auth->verifyEmail($in))],
+        'login'                  => fn ($in) => ['user' => $auth->profile($auth->login($in))],
+        'logout'                 => function () use ($auth) { $auth->logout(); return []; },
+        'request_password_reset' => function ($in) use ($auth) { $auth->requestPasswordReset($in); return ['message' => 'Falls ein Konto zu dieser Adresse existiert, haben wir dir einen Link zum Zurücksetzen geschickt.']; },
+        'reset_password'         => fn ($in) => ['user' => $auth->profile($auth->resetPassword($in))],
+    ];
+    if (isset($public[$action])) {
+        requirePost($method);
+        Http::ok($public[$action](Http::jsonBody()));
+    }
+
+    $user = $auth->requireUser();
+
+    if ($action === 'me') {
+        Http::ok(['user' => $auth->profile($user)]);
+    }
+    if ($action === 'update_profile') {
+        requirePost($method);
+        Http::ok(['user' => $auth->profile($auth->updateProfile($user, Http::jsonBody()))]);
+    }
     if ($action === 'create_event') {
         requirePost($method);
-        $created = $store->createEvent(Http::jsonBody());
+        $created = $store->createEvent(Http::jsonBody(), $user);
         Http::ok($created, 201);
     }
 
     $event = $store->requireEvent(Http::header('X-Event-Code'));
-    $actor = $store->actor($event, Http::header('X-Person-Id'));
+    $actor = $store->actor($event, $user['id']);
 
     if ($action === 'event') {
-        Http::ok($store->state($event));
+        Http::ok($store->state($event, $actor));
+    }
+
+    // Beitreten: neue Person anlegen oder einen Platzhalter-Namen übernehmen
+    $joins = [
+        'join_event'   => fn ($in) => $store->joinEvent($event, $in, $user),
+        'claim_person' => fn ($in) => $store->claimPerson($event, $in, $user),
+    ];
+    if (isset($joins[$action])) {
+        requirePost($method);
+        $personId = $joins[$action](Http::jsonBody());
+        Http::ok(['person_id' => $personId, 'state' => $store->state($store->requireEvent($event['access_code']), $personId)]);
+    }
+
+    if ($actor === null) {
+        throw new ApiError(403, 'not_member', 'Du nimmst an diesem Event noch nicht teil. Tritt zuerst bei.');
     }
 
     $mutations = [
@@ -71,6 +122,7 @@ try {
         'delete_expense'     => fn ($in) => $store->deleteExpense($event, $in, $actor),
         'add_settlement'     => fn ($in) => $store->addSettlement($event, $in, $actor),
         'delete_settlement'  => fn ($in) => $store->deleteSettlement($event, $in, $actor),
+        'release_person'     => fn () => $store->releasePerson($event, $actor),
     ];
     if (!isset($mutations[$action])) {
         throw new ApiError(404, 'unknown_action', 'Unbekannte Aktion.');
@@ -78,7 +130,7 @@ try {
     requirePost($method);
     $result = $mutations[$action](Http::jsonBody());
     $event = $store->requireEvent($event['access_code']);
-    Http::ok(array_merge(is_array($result) ? $result : [], ['state' => $store->state($event)]));
+    Http::ok(array_merge(is_array($result) ? $result : [], ['state' => $store->state($event, $store->actor($event, $user['id']))]));
 } catch (ApiError $e) {
     Http::error($e);
 } catch (Throwable $e) {

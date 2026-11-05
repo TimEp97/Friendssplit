@@ -79,3 +79,39 @@ CREATE TABLE IF NOT EXISTS fs_activity (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_activity_event ON fs_activity (event_id, created_at);
+
+CREATE TABLE IF NOT EXISTS fs_users (
+  id                TEXT NOT NULL PRIMARY KEY,
+  email             TEXT NOT NULL UNIQUE,
+  password_hash     TEXT NOT NULL,
+  display_name      TEXT NOT NULL,
+  paypal_me         TEXT NULL,
+  email_verified_at TEXT NULL,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fs_sessions (
+  token_hash TEXT NOT NULL PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON fs_sessions (user_id);
+
+CREATE TABLE IF NOT EXISTS fs_user_tokens (
+  token_hash TEXT NOT NULL PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  purpose    TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON fs_user_tokens (user_id, purpose);
+
+CREATE TABLE IF NOT EXISTS fs_rate_limits (
+  bucket       TEXT    NOT NULL PRIMARY KEY,
+  hits         INTEGER NOT NULL,
+  window_start TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_persons_user ON fs_persons (auth_user_id);

@@ -1,6 +1,6 @@
 // FriendSplit – Frontend. Reines JavaScript ohne Build-Schritt.
-// Alle Daten kommen von der API (api/index.php); der Browser speichert lokal nur,
-// welche Events auf diesem Gerät geöffnet wurden und welche Person gewählt ist.
+// Alle Daten kommen von der API (api/index.php). Angemeldet wird mit E-Mail und Passwort;
+// die Sitzung liegt in einem HttpOnly-Cookie, das JavaScript nicht lesen kann.
 
 const API_URL = 'api/index.php';
 const POLL_MS = 15000;
@@ -125,18 +125,16 @@ const local = {
   set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* privater Modus o. Ä. */ } },
   remove(key) { try { localStorage.removeItem(key); } catch { /* ignorieren */ } },
 };
-const myEvents = () => local.get('fs.events', []);
-function rememberEvent(event) {
-  const list = myEvents().filter((e) => e.code !== event.code);
-  list.unshift({ code: event.code, name: event.name, date: event.date, opened: new Date().toISOString() });
-  local.set('fs.events', list.slice(0, 30));
+const lastEventCode = () => local.get('fs.lastEvent', null);
+/** Ziel nach der Anmeldung merken – auch über den Bestätigungslink in einem neuen Tab hinweg. */
+const rememberAfterLogin = (hash) => (hash && hash.startsWith('#/e/') ? local.set('fs.afterLogin', hash) : local.remove('fs.afterLogin'));
+function takeAfterLogin() {
+  const hash = local.get('fs.afterLogin', null);
+  local.remove('fs.afterLogin');
+  return hash && hash.startsWith('#/e/') ? hash : '#/';
 }
-function forgetEvent(code) {
-  local.set('fs.events', myEvents().filter((e) => e.code !== code));
-  local.remove(`fs.me.${code}`);
-}
-const getMe = (code) => local.get(`fs.me.${code}`, null);
-const setMe = (code, id) => (id ? local.set(`fs.me.${code}`, id) : local.remove(`fs.me.${code}`));
+/** Eigene Person im geöffneten Event – kommt vom Server, abhängig vom angemeldeten Konto. */
+const getMe = (code) => (S.data && S.data.event.code === code ? S.data.me : null);
 
 // ---------------------------------------------------------------- API
 
@@ -149,12 +147,11 @@ class ApiError extends Error {
 
 async function api(action, { body = null, code = null } = {}) {
   const headers = { Accept: 'application/json' };
-  if (code) {
-    headers['X-Event-Code'] = code;
-    const me = getMe(code);
-    if (me) headers['X-Person-Id'] = me;
+  if (code) headers['X-Event-Code'] = code;
+  if (body) {
+    headers['Content-Type'] = 'application/json';
+    headers['X-Requested-With'] = 'FriendSplit'; // Schutz vor CSRF, prüft der Server
   }
-  if (body) headers['Content-Type'] = 'application/json';
   let response;
   try {
     response = await fetch(`${API_URL}?action=${encodeURIComponent(action)}`, {
@@ -172,6 +169,12 @@ async function api(action, { body = null, code = null } = {}) {
   if (!json) throw new ApiError('bad_response', `Unerwartete Antwort vom Server (HTTP ${response.status}). Die Änderung wurde möglicherweise nicht gespeichert.`, { status: response.status });
   if (!response.ok || !json.ok) {
     const e = json.error ?? {};
+    if (e.code === 'not_authenticated' && S.user) {
+      // Sitzung abgelaufen oder anderswo abgemeldet → zur Anmeldung
+      S.user = null;
+      rememberAfterLogin(location.hash);
+      setTimeout(() => go('#/login'), 0);
+    }
     throw new ApiError(e.code ?? 'error', e.message ?? 'Unbekannter Fehler.', { fields: e.fields, status: response.status, data: e.data });
   }
   return json.data;
@@ -196,6 +199,9 @@ const S = {
   editingPaypal: null,
   editingEvent: false,
   afterPick: null,
+  user: undefined, // undefined = noch nicht geprüft, null = abgemeldet, sonst Profil vom Server
+  notice: null, // Hinweis nach Registrierung o. Ä.: { email, kind }
+  verifying: null, // Zustand beim Bestätigen per E-Mail-Link
 };
 
 const main = document.getElementById('main');
@@ -211,9 +217,10 @@ function applyState(data) {
   S.data = data;
   S.dataJson = json;
   S.stale = false;
-  rememberEvent(data.event);
-  const me = getMe(data.event.code);
-  if (me && !data.participants.some((p) => p.id === me)) setMe(data.event.code, null);
+  local.set('fs.lastEvent', data.event.code);
+  if (S.user && data.me && !S.user.events.some((e) => e.code === data.event.code)) {
+    S.user.events.unshift({ code: data.event.code, name: data.event.name, date: data.event.date });
+  }
   return changed;
 }
 
@@ -241,6 +248,12 @@ function parseRoute() {
   const [path, query = ''] = location.hash.replace(/^#\/?/, '').split('?');
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'neu') return { name: 'create' };
+  if (parts[0] === 'login') return { name: 'login' };
+  if (parts[0] === 'registrieren') return { name: 'register' };
+  if (parts[0] === 'passwort-vergessen') return { name: 'forgot' };
+  if (parts[0] === 'bestaetigen' && parts[1]) return { name: 'verify', token: parts[1] };
+  if (parts[0] === 'passwort-neu' && parts[1]) return { name: 'reset', token: parts[1] };
+  if (parts[0] === 'profil') return { name: 'profile' };
   if (parts[0] === 'e' && parts[1]) {
     const code = normalizeCode(parts[1]);
     if (parts[2] === 'ausgabe') return { name: 'expense', code, expenseId: parts[3] && parts[3] !== 'neu' ? parts[3] : null };
@@ -253,10 +266,36 @@ function parseRoute() {
 const go = (hash) => { if (location.hash === hash) onRoute(); else location.hash = hash; };
 const eventPath = (sub = 'ausgaben') => `#/e/${S.code}/${sub}`;
 
+const PUBLIC_ROUTES = ['login', 'register', 'forgot', 'verify', 'reset'];
+
+async function loadUser() {
+  try {
+    S.user = (await api('me')).user;
+  } catch (error) {
+    S.user = error.code === 'not_authenticated' ? null : undefined;
+    if (S.user === undefined) throw error;
+  }
+}
+
 async function onRoute() {
-  const route = parseRoute();
+  let route = parseRoute();
+  if (S.user === undefined) {
+    try { await loadUser(); } catch (error) { main.innerHTML = String(viewOffline(error)); return; }
+    route = parseRoute();
+  }
+  // Ohne Anmeldung nur Login, Registrierung und E-Mail-Links; angemeldet keine Login-Seiten.
+  if (!S.user && !PUBLIC_ROUTES.includes(route.name)) {
+    rememberAfterLogin(location.hash);
+    location.replace('#/login');
+    return;
+  }
+  if (S.user && ['login', 'register', 'forgot'].includes(route.name)) {
+    location.replace(takeAfterLogin());
+    return;
+  }
   const previous = S.route;
   S.route = route;
+  if (route.name === 'verify' && previous.token !== route.token) verifyEmail(route.token);
   if (route.name !== 'expense') S.form = null;
   if (route.name !== 'personen') { S.renaming = null; S.editingEvent = false; }
 
@@ -271,6 +310,10 @@ async function onRoute() {
       render();
       await loadEvent();
       if (S.route !== route) return;
+    }
+    if (S.data && route.name === 'wer' && person(getMe(S.code))) {
+      location.replace(eventPath());
+      return;
     }
     if (S.data && route.name !== 'wer' && !person(getMe(S.code))) {
       S.afterPick = location.hash;
@@ -290,7 +333,10 @@ async function onRoute() {
 // ---------------------------------------------------------------- Rendering
 
 function render() {
-  const views = { home: viewHome, create: viewCreate, wer: viewPicker, ausgaben: viewExpenses, abrechnung: viewSettle, personen: viewPeople, expense: viewExpenseForm };
+  const views = {
+    home: viewHome, create: viewCreate, wer: viewPicker, ausgaben: viewExpenses, abrechnung: viewSettle, personen: viewPeople, expense: viewExpenseForm,
+    login: viewLogin, register: viewRegister, forgot: viewForgot, verify: viewVerify, reset: viewReset, profile: viewProfile,
+  };
   let content;
   if (S.route.code && !S.data) content = S.loadError ? viewLoadError() : viewLoading();
   else content = views[S.route.name]();
@@ -301,8 +347,8 @@ function render() {
 }
 
 function renderTabbar() {
-  const hideOn = ['create', 'expense', 'wer'];
-  const code = S.route.code ? S.code : myEvents()[0]?.code;
+  const hideOn = ['create', 'expense', 'wer', ...PUBLIC_ROUTES];
+  const code = S.route.code ? S.code : S.user?.events.find((e) => e.code === lastEventCode())?.code;
   if (hideOn.includes(S.route.name) || (S.route.code && !S.data)) { tabbar.hidden = true; document.body.classList.remove('has-tabbar'); return; }
   const items = [
     { key: 'home', href: '#/', label: 'Events', icon: 'events' },
@@ -355,8 +401,8 @@ function eventHeader(subtitle) {
         <p class="muted">${meta}</p>
       </div>
       <div class="event-head__actions">
-        <button class="chip chip--me" data-action="switch-person" aria-label="Du bist ${me?.name ?? 'niemand'}. Person wechseln">
-          ${icon('user')}<span>Du: <strong>${me?.name ?? '–'}</strong></span></button>
+        <a class="chip chip--me" href="#/profil" aria-label="Du bist ${me?.name ?? 'niemand'}. Zu deinem Profil">
+          ${icon('user')}<span>Du: <strong>${me?.name ?? '–'}</strong></span></a>
         <a class="btn btn--primary hide-mobile" href="${eventPath('ausgabe/neu')}">${icon('plus')} Ausgabe hinzufügen</a>
       </div>
     </header>`;
@@ -367,8 +413,11 @@ const fab = () => html`<a class="fab" href="${eventPath('ausgabe/neu')}">${icon(
 // ---------- Start / Events
 
 function viewHome() {
-  const events = myEvents();
+  const events = S.user.events;
   return html`
+    <div class="topbar">
+      <a class="chip chip--me" href="#/profil">${icon('user')}<span>${S.user.name}</span></a>
+    </div>
     <section class="hero">
       <p class="brand"><img src="assets/icon.svg" alt="" width="36" height="36"> FriendSplit</p>
       <h1 tabindex="-1">Gemeinsam unterwegs, fair geteilt.</h1>
@@ -391,14 +440,13 @@ function viewHome() {
     <section>
       <h2>Meine Events</h2>
       ${events.length === 0
-        ? html`<p class="muted">Hier erscheinen Events, die du auf diesem Gerät erstellt oder geöffnet hast.</p>`
+        ? html`<p class="muted">Hier erscheinen alle Events, an denen du teilnimmst – auf jedem Gerät, auf dem du angemeldet bist.</p>`
         : html`<ul class="list">${events.map((e) => html`
           <li class="card card--link">
             <a href="#/e/${e.code}/ausgaben" class="card__main">
               <span class="card__title">${e.name}</span>
-              <span class="muted small">${[e.date && formatDate(e.date), `zuletzt geöffnet ${relativeTime(e.opened)}`].filter(Boolean).join(' · ')}</span>
+              ${e.date ? html`<span class="muted small">${formatDate(e.date)}</span>` : ''}
             </a>
-            <button class="btn-icon" data-action="forget-event" data-code="${e.code}" aria-label="${e.name} aus dieser Liste entfernen" title="Aus Liste entfernen">${icon('close')}</button>
           </li>`)}</ul>`}
     </section>`;
 }
@@ -432,17 +480,12 @@ function viewCreate() {
         <textarea id="f-notes" name="notes" rows="2" maxlength="1000"></textarea>
       </div>
       <div class="field">
-        <label for="f-creator">Dein Name <span class="req" aria-hidden="true">*</span></label>
-        <input id="f-creator" name="creator_name" maxlength="60" required autocomplete="given-name" placeholder="z. B. Mathis" aria-describedby="err-creator_name">
-        <p class="field-error" id="err-creator_name"></p>
-      </div>
-      <div class="field">
         <label for="f-person">Weitere Teilnehmende</label>
         <div class="inline-form">
           <input id="f-person" maxlength="60" placeholder="Name eingeben, z. B. Alex" aria-describedby="hint-person err-participants" enterkeyhint="enter">
           <button class="btn" type="button" data-action="create-add-person">${icon('plus')} Hinzufügen</button>
         </div>
-        <p class="hint" id="hint-person">Mit Enter hinzufügen. Weitere Personen kannst du auch später ergänzen.</p>
+        <p class="hint" id="hint-person">Du (${S.user.name}) bist automatisch dabei. Mit Enter hinzufügen. Die anderen wählen ihren Namen, wenn sie den Link öffnen und sich anmelden.</p>
         <p class="field-error" id="err-participants"></p>
         <ul class="chips" id="people-chips" aria-label="Hinzugefügte Teilnehmende"></ul>
       </div>
@@ -464,31 +507,199 @@ function renderCreatePeople() {
 
 function viewPicker() {
   const { event, participants } = S.data;
-  const me = getMe(S.code);
+  const free = participants.filter((p) => !p.linked);
+  const nameTaken = participants.some((p) => p.name.toLowerCase() === S.user.name.toLowerCase());
   return html`
     ${staleBanner()}
     <section class="picker">
       <p class="eyebrow">${event.name}</p>
-      <h1 tabindex="-1">Wer bist du?</h1>
-      ${participants.length
-        ? html`<p class="lead">Wähle deinen Namen, um Ausgaben einzutragen.</p>
-          <ul class="person-grid">${participants.map((p) => html`
-            <li><button class="person-btn" data-action="pick-person" data-id="${p.id}" aria-pressed="${p.id === me}">
+      <h1 tabindex="-1">Wer bist du in diesem Event?</h1>
+      ${free.length
+        ? html`<p class="lead">Steht dein Name schon in der Liste? Dann wähle ihn – Ausgaben, die schon für dich eingetragen sind, gehören danach zu deinem Konto.</p>
+          <ul class="person-grid">${free.map((p) => html`
+            <li><button class="person-btn" data-action="pick-person" data-id="${p.id}">
               ${avatar(p.id, p.name)}<span>${p.name}</span></button></li>`)}</ul>`
-        : html`<div class="empty empty--inline"><p>Noch keine Teilnehmenden – füge dich als erste Person hinzu.</p></div>`}
+        : ''}
       <form id="join-self-form" class="card" novalidate>
-        <h2>${participants.length ? 'Nicht in der Liste?' : 'Personen hinzufügen'}</h2>
+        <h2>${free.length ? 'Nicht in der Liste?' : 'Event beitreten'}</h2>
         <div class="inline-form">
           <div class="field field--grow">
-            <label for="f-self">Dein Name</label>
-            <input id="f-self" name="name" maxlength="60" autocomplete="given-name" aria-describedby="err-name">
+            <label for="f-self">Dein Name im Event</label>
+            <input id="f-self" name="name" maxlength="60" value="${nameTaken ? '' : S.user.name}" autocomplete="given-name" aria-describedby="err-name">
             <p class="field-error" id="err-name"></p>
           </div>
-          <button class="btn btn--primary" type="submit">Hinzufügen und auswählen</button>
+          <button class="btn btn--primary" type="submit">Beitreten</button>
         </div>
       </form>
-      <p class="note">ℹ️ Die Namensauswahl ist keine sichere Anmeldung: Alle mit dem Event-Link können jeden Namen wählen. Teilt den Link daher nur innerhalb eurer Gruppe.</p>
+      ${participants.some((p) => p.linked) ? html`<p class="muted small">Bereits mit Konto dabei: ${joinNames(participants.filter((p) => p.linked).map((p) => p.name))}</p>` : ''}
     </section>`;
+}
+
+// ---------- Konto: Anmelden, Registrieren, E-Mail-Links, Profil
+
+function viewOffline(error) {
+  return html`
+    <section class="empty">
+      <div class="empty__icon" aria-hidden="true">📡</div>
+      <h1 tabindex="-1">FriendSplit ist gerade nicht erreichbar</h1>
+      <p>${error.message}</p>
+      <div class="row row--center"><button class="btn btn--primary" data-action="reload">${icon('refresh')} Neu laden</button></div>
+    </section>`;
+}
+
+const authHead = (title, lead) => html`
+  <section class="hero hero--auth">
+    <p class="brand"><img src="assets/icon.svg" alt="" width="36" height="36"> FriendSplit</p>
+    <h1 tabindex="-1">${title}</h1>
+    ${lead ? html`<p class="lead">${lead}</p>` : ''}
+  </section>`;
+
+/** Hinweis „Schau in dein Postfach“ nach Registrierung bzw. bei unbestätigter Adresse. */
+function mailNotice() {
+  const n = S.notice;
+  if (!n) return '';
+  return html`
+    <div class="card notice" role="status">
+      <h2>📬 Schau in dein Postfach</h2>
+      <p>${n.kind === 'unverified'
+        ? html`Deine E-Mail-Adresse <strong>${n.email}</strong> ist noch nicht bestätigt. Klicke auf den Link in unserer E-Mail.`
+        : html`Wir haben eine E-Mail an <strong>${n.email}</strong> geschickt. Klicke auf den Link darin, um dein Konto zu bestätigen – danach bist du direkt angemeldet.`}</p>
+      <p class="muted small">Nichts angekommen? Prüfe den Spam-Ordner oder lass dir den Link noch einmal schicken.</p>
+      <button class="btn btn--small" data-action="resend-verification" data-email="${n.email}">Bestätigungslink erneut senden</button>
+    </div>`;
+}
+
+function viewLogin() {
+  return html`
+    ${authHead('Anmelden', 'Teilt Ausgaben mit euren Freund:innen – alle Events an einem Ort, auf jedem Gerät.')}
+    ${mailNotice()}
+    <form id="login-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-email">E-Mail-Adresse</label>
+        <input id="f-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" value="${S.notice?.email ?? ''}" aria-describedby="err-email"><p class="field-error" id="err-email"></p></div>
+      <div class="field"><label for="f-password">Passwort</label>
+        <input id="f-password" name="password" type="password" autocomplete="current-password" aria-describedby="err-password"><p class="field-error" id="err-password"></p></div>
+      <div class="form-actions form-actions--split">
+        <a href="#/passwort-vergessen">Passwort vergessen?</a>
+        <button class="btn btn--primary" type="submit">Anmelden</button>
+      </div>
+    </form>
+    <p class="center">Noch kein Konto? <a href="#/registrieren">Jetzt registrieren</a></p>`;
+}
+
+function viewRegister() {
+  if (S.notice?.kind === 'registered') {
+    return html`${authHead('Fast geschafft!')}${mailNotice()}<p class="center"><a href="#/login">Zur Anmeldung</a></p>`;
+  }
+  return html`
+    ${authHead('Konto erstellen', 'Mit deinem Konto siehst du alle deine Events und musst deinen PayPal.me-Link nur einmal hinterlegen.')}
+    <form id="register-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-name">Dein Name</label>
+        <input id="f-name" name="name" maxlength="60" autocomplete="given-name" placeholder="z. B. Alex" aria-describedby="hint-name err-name">
+        <p class="hint" id="hint-name">So erscheinst du in neuen Events.</p><p class="field-error" id="err-name"></p></div>
+      <div class="field"><label for="f-email">E-Mail-Adresse</label>
+        <input id="f-email" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="err-email"><p class="field-error" id="err-email"></p></div>
+      <div class="field"><label for="f-password">Passwort</label>
+        <input id="f-password" name="password" type="password" autocomplete="new-password" minlength="8" aria-describedby="hint-password err-password">
+        <p class="hint" id="hint-password">Mindestens 8 Zeichen.</p><p class="field-error" id="err-password"></p></div>
+      <div class="form-actions"><button class="btn btn--primary" type="submit">Registrieren</button></div>
+    </form>
+    <p class="center">Schon registriert? <a href="#/login">Anmelden</a></p>`;
+}
+
+function viewForgot() {
+  if (S.notice?.kind === 'reset') {
+    return html`${authHead('E-Mail ist unterwegs')}
+      <div class="card notice" role="status"><p>Falls es ein Konto zu <strong>${S.notice.email}</strong> gibt, haben wir dir einen Link geschickt. Er ist 60 Minuten gültig.</p></div>
+      <p class="center"><a href="#/login">Zur Anmeldung</a></p>`;
+  }
+  return html`
+    ${authHead('Passwort vergessen', 'Gib deine E-Mail-Adresse ein. Wir schicken dir einen Link, mit dem du ein neues Passwort festlegst.')}
+    <form id="forgot-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-email">E-Mail-Adresse</label>
+        <input id="f-email" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="err-email"><p class="field-error" id="err-email"></p></div>
+      <div class="form-actions form-actions--split"><a href="#/login">Zurück</a><button class="btn btn--primary" type="submit">Link senden</button></div>
+    </form>`;
+}
+
+async function verifyEmail(token) {
+  S.verifying = { state: 'busy' };
+  try {
+    const result = await api('verify_email', { body: { token } });
+    S.user = result.user;
+    S.notice = null;
+    S.verifying = null;
+    toast('E-Mail bestätigt – willkommen bei FriendSplit!');
+    go(takeAfterLogin());
+  } catch (error) {
+    S.verifying = { state: 'error', message: error.message };
+    if (S.route.name === 'verify') render();
+  }
+}
+
+function viewVerify() {
+  if (!S.verifying || S.verifying.state === 'busy') {
+    return html`<div class="state-msg" role="status"><span class="spinner" aria-hidden="true"></span> E-Mail-Adresse wird bestätigt …</div>`;
+  }
+  return html`
+    <section class="empty">
+      <div class="empty__icon" aria-hidden="true">⌛</div>
+      <h1 tabindex="-1">Link funktioniert nicht</h1>
+      <p>${S.verifying.message}</p>
+      <div class="row row--center"><a class="btn btn--primary" href="${S.user ? '#/' : '#/login'}">${S.user ? 'Zur Startseite' : 'Zur Anmeldung'}</a></div>
+    </section>`;
+}
+
+function viewReset() {
+  return html`
+    ${authHead('Neues Passwort', 'Lege ein neues Passwort fest. Danach bist du angemeldet und auf allen anderen Geräten abgemeldet.')}
+    <form id="reset-form" class="form card" novalidate>
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-password">Neues Passwort</label>
+        <input id="f-password" name="password" type="password" autocomplete="new-password" minlength="8" aria-describedby="hint-password err-password">
+        <p class="hint" id="hint-password">Mindestens 8 Zeichen.</p><p class="field-error" id="err-password"></p></div>
+      <div class="form-actions"><button class="btn btn--primary" type="submit">Passwort speichern</button></div>
+    </form>`;
+}
+
+function viewProfile() {
+  const u = S.user;
+  return html`
+    <header class="form-head">
+      <a class="btn-icon" href="${S.code ? eventPath() : '#/'}" aria-label="Zurück">${icon('back')}</a>
+      <h1 tabindex="-1">Dein Profil</h1>
+    </header>
+    <section class="card">
+      <div class="profile-head">${avatar(u.id, u.name)}<div><p class="card__title">${u.name}</p><p class="muted small">${u.email}</p></div></div>
+    </section>
+
+    <section class="card section" aria-labelledby="paypal-heading">
+      <h2 id="paypal-heading">PayPal</h2>
+      <form id="profile-form" class="form" novalidate>
+        <div class="field"><label for="f-paypal">Dein PayPal.me-Link</label>
+          <input id="f-paypal" name="paypal" maxlength="200" value="${u.paypal ? `paypal.me/${u.paypal}` : ''}" placeholder="paypal.me/deinname"
+            inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
+          <p class="hint" id="hint-paypal">Gilt automatisch in allen deinen Events. Wer dir Geld schuldet, kann dir den Betrag in der Abrechnung mit einem Tipp per PayPal senden.
+            ${canScanQr() ? '' : 'Tipp: Deinen PayPal-QR-Code kannst du mit der Kamera-App scannen und den Link hier einfügen.'}</p>
+          <p class="field-error" id="err-paypal"></p></div>
+        ${u.paypal ? html`<p class="small">Test: <a href="${paypalLink(u.paypal, 0)}" target="_blank" rel="noopener noreferrer">paypal.me/${u.paypal}</a> öffnen</p>` : ''}
+        <div class="form-actions">
+          ${canScanQr() ? html`<label class="btn">📷 QR-Code scannen<input type="file" id="f-paypal-qr" accept="image/*" capture="environment" class="visually-hidden"></label>` : ''}
+          <button class="btn btn--primary" type="submit">Speichern</button>
+        </div>
+      </form>
+    </section>
+
+    <button class="btn btn--ghost btn--danger-ghost" data-action="logout">Abmelden</button>`;
+}
+
+/** Nach dem Beitreten zurück dorthin, wo man hinwollte. */
+function afterJoin() {
+  const next = S.afterPick && !S.afterPick.includes('/wer') ? S.afterPick : eventPath();
+  S.afterPick = null;
+  go(next);
 }
 
 // ---------- Ausgaben
@@ -776,7 +987,7 @@ function viewSettle() {
                   ? html`<a class="btn btn--small btn--paypal ${pay.from === me ? 'btn--primary' : ''}" href="${paypalLink(person(pay.to).paypal, pay.amount_cents)}" target="_blank" rel="noopener noreferrer"
                       aria-label="${euro(pay.amount_cents)} per PayPal an ${personName(pay.to)} senden">PayPal: ${euro(pay.amount_cents)} senden</a>`
                   : pay.to === me
-                    ? html`<a class="btn btn--small btn--ghost" href="${eventPath('personen')}">PayPal.me hinterlegen</a>`
+                    ? html`<a class="btn btn--small btn--ghost" href="#/profil">PayPal.me im Profil hinterlegen</a>`
                     : html`<span class="muted small">${personName(pay.to)} hat keinen PayPal.me-Link hinterlegt</span>`}
                 <button class="btn btn--small" data-action="settle" data-from="${pay.from}" data-to="${pay.to}" data-amount="${pay.amount_cents}">✓ Als bezahlt markieren</button>
               </div>
@@ -831,6 +1042,17 @@ function viewSettle() {
 
 // ---------- Teilnehmende
 
+/** PayPal-Status einer Person: eigener Link → Profil, andere mit Konto → nur Anzeige, Platzhalter → bearbeitbar. */
+function paypalChip(p, me) {
+  const set = p.paypal ? 'paypal-chip--set' : '';
+  const label = p.paypal ? '✓ PayPal' : '+ PayPal';
+  if (p.id === me) return html`<a class="paypal-chip ${set}" href="#/profil" title="Im Profil ändern">${label}</a>`;
+  if (p.linked) return p.paypal ? html`<span class="paypal-chip ${set}" title="paypal.me/${p.paypal}">✓ PayPal</span>` : '';
+  return html`<button class="paypal-chip ${set}" data-action="edit-paypal" data-id="${p.id}"
+    aria-label="${p.paypal ? `PayPal.me von ${p.name} ändern (${p.paypal})` : `PayPal.me für ${p.name} hinterlegen`}"
+    title="${p.paypal ? `paypal.me/${p.paypal}` : 'PayPal.me hinterlegen'}">${label}</button>`;
+}
+
 function viewPeople() {
   const { event, participants, activity, summary } = S.data;
   const me = getMe(S.code);
@@ -853,11 +1075,10 @@ function viewPeople() {
       ${participants.length === 0 ? html`<p class="muted">Noch keine Teilnehmenden – füge unten die erste Person hinzu.</p>` : ''}
       <ul class="list">${participants.map((p) => S.editingPaypal === p.id
         ? html`<li class="card"><form id="paypal-form" class="form" data-id="${p.id}" novalidate>
-            <div class="field"><label for="f-paypal">PayPal.me-Link ${p.id === me ? 'von dir' : `von ${p.name}`}</label>
+            <div class="field"><label for="f-paypal">PayPal.me-Link von ${p.name}</label>
               <input id="f-paypal" name="paypal" maxlength="200" value="${p.paypal ? `paypal.me/${p.paypal}` : ''}" placeholder="paypal.me/deinname"
                 inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
-              <p class="hint" id="hint-paypal">Link oder Namen von PayPal.me eintragen. Am Ende der Abrechnung können die anderen dir den offenen Betrag dann mit einem Tipp per PayPal senden.
-                ${canScanQr() ? '' : 'Tipp: Deinen PayPal-QR-Code kannst du mit der Kamera-App scannen und den Link hier einfügen.'}</p>
+              <p class="hint" id="hint-paypal">${p.name} hat noch kein Konto. Trag den PayPal.me-Link für ${p.name} ein, damit die anderen in der Abrechnung direkt per PayPal zahlen können. Sobald ${p.name} sich anmeldet, gilt der Link aus dem Profil.</p>
               <p class="field-error" id="err-paypal"></p></div>
             <div class="form-actions">
               ${canScanQr() ? html`<label class="btn">📷 QR-Code scannen<input type="file" id="f-paypal-qr" accept="image/*" capture="environment" class="visually-hidden"></label>` : ''}
@@ -876,9 +1097,8 @@ function viewPeople() {
             <span class="person-row__name">${p.name}
               ${p.id === me ? html`<span class="badge">Du</span>` : ''}
               ${p.role === 'organizer' ? html`<span class="badge badge--soft">Organisator:in</span>` : ''}
-              <button class="paypal-chip ${p.paypal ? 'paypal-chip--set' : ''}" data-action="edit-paypal" data-id="${p.id}"
-                aria-label="${p.paypal ? `PayPal.me von ${p.name} ändern (${p.paypal})` : `PayPal.me für ${p.name} hinterlegen`}"
-                title="${p.paypal ? `paypal.me/${p.paypal}` : 'PayPal.me hinterlegen'}">${p.paypal ? '✓ PayPal' : '+ PayPal'}</button></span>
+              ${p.linked ? '' : html`<span class="badge badge--muted" title="Noch nicht mit einem Konto verknüpft">ohne Konto</span>`}
+              ${paypalChip(p, me)}</span>
             <span class="muted small person-row__bal">${signedEuro(summary.people[p.id]?.balance ?? 0)}</span>
             <button class="btn-icon" data-action="rename" data-id="${p.id}" aria-label="${p.name} umbenennen" title="Umbenennen">${icon('edit')}</button>
             <button class="btn-icon btn-icon--danger" data-action="remove-person" data-id="${p.id}" aria-label="${p.name} entfernen" title="Entfernen">${icon('trash')}</button>
@@ -891,7 +1111,7 @@ function viewPeople() {
         </div>
         <button class="btn btn--primary" type="submit">${icon('plus')} Hinzufügen</button>
       </form>
-      <button class="btn btn--ghost" data-action="switch-person">${icon('user')} Ich bin nicht ${person(me)?.name ?? '…'} – Person wechseln</button>
+      <button class="btn btn--ghost" data-action="switch-person">${icon('user')} Ich bin nicht ${person(me)?.name ?? '…'} – anderen Namen wählen</button>
     </section>
 
     <section class="card section" aria-labelledby="details-heading">
@@ -922,8 +1142,7 @@ function viewPeople() {
         : html`<p class="muted">Noch keine Änderungen.</p>`}
     </section>
 
-    <p class="note">ℹ️ Die Namensauswahl ist keine sichere Anmeldung: Alle mit dem Event-Link können Ausgaben eintragen, ändern und löschen. Jede Änderung erscheint im Verlauf.</p>
-    <button class="btn btn--ghost btn--danger-ghost" data-action="forget-event" data-code="${event.code}">Event von diesem Gerät entfernen</button>
+    <p class="note">ℹ️ Alle Teilnehmenden können Ausgaben eintragen, ändern und löschen. Jede Änderung erscheint mit Namen im Verlauf.</p>
     ${participants.length ? fab() : ''}`;
 }
 
@@ -1018,7 +1237,7 @@ async function mutate(action, body, { success, button } = {}) {
   } catch (error) {
     setBusy(button, false);
     toast(error.message, 'error');
-    if (['conflict', 'expense_not_found', 'person_not_found', 'settlement_not_found'].includes(error.code)) {
+    if (['conflict', 'expense_not_found', 'person_not_found', 'settlement_not_found', 'not_member', 'person_taken', 'already_member'].includes(error.code)) {
       await loadEvent({ silent: true });
       render();
     }
@@ -1052,25 +1271,40 @@ const actions = {
     await loadEvent({ silent: !!S.data });
     render();
   },
+  reload: () => location.reload(),
   'retry-submit': (el) => el.closest('form')?.requestSubmit(),
-  'forget-event': async (el) => {
-    const code = el.dataset.code;
-    const name = myEvents().find((e) => e.code === code)?.name ?? S.data?.event.name ?? 'Event';
-    const ok = await confirmDialog({ title: 'Aus Liste entfernen?', text: `„${name}“ wird nur von diesem Gerät entfernt. Die Daten bleiben für die Gruppe erhalten und du kannst das Event jederzeit über den Link wieder öffnen.`, confirm: 'Entfernen' });
-    if (!ok) return;
-    forgetEvent(code);
-    if (S.code === code) go('#/'); else render();
-  },
   'create-add-person': () => addCreatePerson(),
   'create-remove-person': (el) => { S.createPeople.splice(Number(el.dataset.index), 1); renderCreatePeople(); document.getElementById('f-person')?.focus(); },
-  'pick-person': (el) => {
-    setMe(S.code, el.dataset.id);
-    const next = S.afterPick && !S.afterPick.includes('/wer') ? S.afterPick : eventPath();
-    S.afterPick = null;
-    toast(`Du bist jetzt als ${personName(el.dataset.id)} unterwegs.`);
-    go(next);
+  'pick-person': async (el) => {
+    const name = personName(el.dataset.id);
+    const ok = await confirmDialog({ title: `Bist du ${name}?`, text: `${name} wird mit deinem Konto verknüpft. Andere sehen das in der Teilnehmendenliste.`, confirm: `Ja, ich bin ${name}` });
+    if (!ok) return;
+    const result = await mutate('claim_person', { person_id: el.dataset.id }, { success: `Willkommen, ${name}!`, button: el });
+    if (result) afterJoin();
   },
-  'switch-person': () => { S.afterPick = location.hash; go(eventPath('wer')); },
+  'switch-person': async () => {
+    const name = person(getMe(S.code))?.name ?? '';
+    const ok = await confirmDialog({ title: 'Anderen Namen wählen?', text: `Die Verknüpfung von ${name} mit deinem Konto wird gelöst. ${name} bleibt mit allen Ausgaben im Event. Danach wählst du deinen richtigen Namen.`, confirm: 'Verknüpfung lösen' });
+    if (!ok) return;
+    S.afterPick = eventPath('personen');
+    if (await mutate('release_person', {}, {})) go(eventPath('wer'));
+  },
+  logout: async (el) => {
+    setBusy(el, true, 'Abmelden …');
+    try { await api('logout', { body: {} }); } catch { /* trotzdem lokal abmelden */ }
+    S.user = null;
+    S.data = null; S.code = null; S.dataJson = '';
+    go('#/login');
+    toast('Du bist abgemeldet.');
+  },
+  'resend-verification': async (el) => {
+    setBusy(el, true, 'Sendet …');
+    try {
+      const result = await api('resend_verification', { body: { email: el.dataset.email } });
+      toast(result.message);
+    } catch (error) { toast(error.message, 'error'); }
+    setBusy(el, false);
+  },
   'reset-filters': () => { S.filters = { person: '', category: '' }; render(); },
   'toggle-all': () => {
     const boxes = [...document.querySelectorAll('#expense-form input[name="participants"]')];
@@ -1112,7 +1346,10 @@ const actions = {
     if (!ok) return;
     const wasMe = p.id === getMe(S.code);
     const result = await mutate('remove_participant', { person_id: p.id }, { success: `${p.name} wurde entfernt`, button: el });
-    if (result && wasMe) { setMe(S.code, null); S.afterPick = eventPath('personen'); go(eventPath('wer')); }
+    if (result && wasMe) {
+      S.user.events = S.user.events.filter((e) => e.code !== S.code);
+      go('#/');
+    }
   },
   'edit-event': () => { S.editingEvent = true; render(); document.getElementById('e-name')?.focus(); },
   'cancel-event-edit': () => { S.editingEvent = false; render(); },
@@ -1132,7 +1369,7 @@ function addCreatePerson() {
   const input = document.getElementById('f-person');
   const err = document.getElementById('err-participants');
   const names = input.value.split(/[,;\n]/).map((n) => n.trim()).filter(Boolean);
-  const creator = document.getElementById('f-creator').value.trim().toLowerCase();
+  const creator = S.user.name.toLowerCase();
   err.textContent = '';
   for (const name of names) {
     if (name.length > 60) { err.textContent = 'Namen dürfen höchstens 60 Zeichen lang sein.'; continue; }
@@ -1148,6 +1385,101 @@ function addCreatePerson() {
 // ---------------------------------------------------------------- Formulare
 
 const forms = {
+  'login-form': async (form) => {
+    clearErrors(form);
+    const data = Object.fromEntries(new FormData(form));
+    const errors = {};
+    if (!data.email.trim()) errors.email = 'Bitte gib deine E-Mail-Adresse ein.';
+    if (!data.password) errors.password = 'Bitte gib dein Passwort ein.';
+    if (Object.keys(errors).length) return showFieldErrors(form, errors);
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true, 'Anmelden …');
+    try {
+      S.user = (await api('login', { body: data })).user;
+      S.notice = null;
+      go(takeAfterLogin());
+    } catch (error) {
+      setBusy(button, false);
+      if (error.code === 'email_not_verified') { S.notice = { email: data.email.trim(), kind: 'unverified' }; render(); return; }
+      if (error.fields) showFieldErrors(form, error.fields);
+      else showFormError(form, error.message, []);
+      form.elements.password.value = '';
+    }
+  },
+
+  'register-form': async (form) => {
+    clearErrors(form);
+    const data = Object.fromEntries(new FormData(form));
+    const errors = {};
+    if (!data.name.trim()) errors.name = 'Bitte gib deinen Namen ein.';
+    if (!data.email.trim()) errors.email = 'Bitte gib deine E-Mail-Adresse ein.';
+    if (data.password.length < 8) errors.password = 'Das Passwort muss mindestens 8 Zeichen lang sein.';
+    if (Object.keys(errors).length) return showFieldErrors(form, errors);
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true, 'Registriert …');
+    try {
+      await api('register', { body: data });
+      S.notice = { email: data.email.trim(), kind: 'registered' };
+      render();
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields);
+      else showFormError(form, error.message, []);
+    }
+  },
+
+  'forgot-form': async (form) => {
+    clearErrors(form);
+    const email = form.elements.email.value.trim();
+    if (!email) return showFieldErrors(form, { email: 'Bitte gib deine E-Mail-Adresse ein.' });
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true, 'Sendet …');
+    try {
+      await api('request_password_reset', { body: { email } });
+      S.notice = { email, kind: 'reset' };
+      render();
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields);
+      else showFormError(form, error.message, []);
+    }
+  },
+
+  'reset-form': async (form) => {
+    clearErrors(form);
+    const password = form.elements.password.value;
+    if (password.length < 8) return showFieldErrors(form, { password: 'Das Passwort muss mindestens 8 Zeichen lang sein.' });
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      S.user = (await api('reset_password', { body: { token: S.route.token, password } })).user;
+      S.notice = null;
+      toast('Neues Passwort gespeichert – du bist angemeldet.');
+      go(takeAfterLogin());
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields);
+      else showFormError(form, error.code === 'invalid_token' ? html`${error.message} <a href="#/passwort-vergessen">Neuen Link anfordern</a>` : error.message, []);
+    }
+  },
+
+  'profile-form': async (form) => {
+    clearErrors(form);
+    const paypal = form.elements.paypal.value.trim();
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true);
+    try {
+      S.user = (await api('update_profile', { body: { paypal } })).user;
+      if (S.code) await loadEvent({ silent: true });
+      render();
+      toast(paypal ? 'PayPal.me-Link gespeichert' : 'PayPal.me-Link entfernt');
+    } catch (error) {
+      setBusy(button, false);
+      if (error.fields) showFieldErrors(form, error.fields);
+      else toast(error.message, 'error');
+    }
+  },
+
   'join-form': (form) => {
     clearErrors(form);
     const value = form.elements.code.value;
@@ -1166,13 +1498,11 @@ const forms = {
     const data = Object.fromEntries(new FormData(form));
     const errors = {};
     if (!data.name.trim()) errors.name = 'Bitte gib einen Eventnamen ein.';
-    if (!data.creator_name.trim()) errors.creator_name = 'Bitte gib deinen Namen ein.';
     if (Object.keys(errors).length) return showFieldErrors(form, errors);
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true, 'Erstellt …');
     try {
       const result = await api('create_event', { body: { ...data, participants: S.createPeople } });
-      setMe(result.code, result.person_id);
       S.createPeople = [];
       toast('Event erstellt – lade jetzt deine Gruppe ein.');
       go(`#/e/${result.code}/ausgaben`);
@@ -1190,13 +1520,10 @@ const forms = {
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true);
     try {
-      const result = await api('add_participant', { body: { name }, code: S.code });
+      const result = await api('join_event', { body: { name }, code: S.code });
       applyState(result.state);
-      setMe(S.code, result.person_id);
-      const next = S.afterPick && !S.afterPick.includes('/wer') ? S.afterPick : eventPath();
-      S.afterPick = null;
       toast(`Willkommen, ${name}!`);
-      go(next);
+      afterJoin();
     } catch (error) {
       setBusy(button, false);
       if (error.fields) showFieldErrors(form, error.fields);

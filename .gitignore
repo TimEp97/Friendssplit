@@ -2,3 +2,4 @@ public/api/config.php
 public/data/*.sqlite*
 node_modules/
 .DS_Store
+public/data/mail.log

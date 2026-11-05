@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS fs_persons (
   paypal_me    VARCHAR(40) NULL,
   auth_user_id VARCHAR(64) NULL,
   created_at   DATETIME    NOT NULL,
-  PRIMARY KEY (id)
+  PRIMARY KEY (id),
+  KEY idx_persons_user (auth_user_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS fs_event_participants (
@@ -99,4 +100,49 @@ CREATE TABLE IF NOT EXISTS fs_activity (
   PRIMARY KEY (id),
   KEY idx_activity_event (event_id, created_at),
   CONSTRAINT fk_activity_event FOREIGN KEY (event_id) REFERENCES fs_events (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Benutzerkonten (Anmeldung mit E-Mail und Passwort, E-Mail-Bestätigung)
+CREATE TABLE IF NOT EXISTS fs_users (
+  id                CHAR(16)     NOT NULL,
+  email             VARCHAR(190) NOT NULL,
+  password_hash     VARCHAR(255) NOT NULL,
+  display_name      VARCHAR(60)  NOT NULL,
+  paypal_me         VARCHAR(40)  NULL,
+  email_verified_at DATETIME     NULL,
+  created_at        DATETIME     NOT NULL,
+  updated_at        DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_users_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Angemeldete Sitzungen. Gespeichert wird nur der SHA-256-Hash des Cookie-Werts.
+CREATE TABLE IF NOT EXISTS fs_sessions (
+  token_hash CHAR(64) NOT NULL,
+  user_id    CHAR(16) NOT NULL,
+  created_at DATETIME NOT NULL,
+  expires_at DATETIME NOT NULL,
+  PRIMARY KEY (token_hash),
+  KEY idx_sessions_user (user_id),
+  CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Einmal-Links aus E-Mails (purpose: verify = E-Mail bestätigen, reset = Passwort zurücksetzen). Nur Hashes.
+CREATE TABLE IF NOT EXISTS fs_user_tokens (
+  token_hash CHAR(64)    NOT NULL,
+  user_id    CHAR(16)    NOT NULL,
+  purpose    VARCHAR(16) NOT NULL,
+  expires_at DATETIME    NOT NULL,
+  created_at DATETIME    NOT NULL,
+  PRIMARY KEY (token_hash),
+  KEY idx_user_tokens_user (user_id, purpose),
+  CONSTRAINT fk_user_tokens_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Einfache Begrenzung von Anmeldeversuchen und E-Mails (Schutz vor Durchprobieren und Spam)
+CREATE TABLE IF NOT EXISTS fs_rate_limits (
+  bucket       VARCHAR(120) NOT NULL,
+  hits         INT          NOT NULL,
+  window_start DATETIME     NOT NULL,
+  PRIMARY KEY (bucket)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -470,3 +470,18 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+
+/* ---------- Konto: Anmelden, Registrieren, Profil */
+.topbar { display: flex; justify-content: flex-end; margin-bottom: -0.5rem; }
+.hero--auth { padding-bottom: 0.5rem; }
+.hero--auth h1 { font-size: clamp(1.6rem, 6vw, 2.2rem); }
+.notice h2 { margin-top: 0; }
+.notice p { margin: 0 0 0.75rem; }
+.center { text-align: center; }
+.form-actions--split { justify-content: space-between; align-items: center; }
+.profile-head { display: flex; align-items: center; gap: 0.9rem; }
+.profile-head p { margin: 0; }
+.badge--muted { background: transparent; border: 1px solid currentColor; color: var(--muted); font-weight: 600; }
+a.paypal-chip, span.paypal-chip { text-decoration: none; display: inline-block; }
+span.paypal-chip { cursor: default; }
+a.chip { text-decoration: none; }
