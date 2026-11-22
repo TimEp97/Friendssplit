@@ -31,7 +31,7 @@ final class Db
     }
 
     /** Stand des Datenbankschemas. Erhöhen, wenn sich schema/*.sql ändert. */
-    public const SCHEMA_VERSION = 3;
+    public const SCHEMA_VERSION = 4;
 
     /**
      * Legt fehlende Tabellen an und rüstet Spalten nach. Prüft zuerst die gespeicherte
@@ -67,6 +67,13 @@ final class Db
         }
         if (!self::hasColumn($pdo, 'fs_persons', 'paypal_me')) {
             $pdo->exec('ALTER TABLE fs_persons ADD COLUMN paypal_me ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(40)') . ' NULL');
+        }
+        // PayPal per E-Mail-Adresse (Schema 4)
+        $emailType = self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(190)';
+        foreach (['fs_persons', 'fs_users'] as $table) {
+            if (!self::hasColumn($pdo, $table, 'paypal_email')) {
+                $pdo->exec("ALTER TABLE $table ADD COLUMN paypal_email $emailType NULL");
+            }
         }
         $pdo->prepare('DELETE FROM fs_meta WHERE k = ?')->execute(['schema']);
         $pdo->prepare('INSERT INTO fs_meta (k, v) VALUES (?, ?)')->execute(['schema', (string) self::SCHEMA_VERSION]);

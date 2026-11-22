@@ -8,7 +8,7 @@ Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen
 - Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen. Wer den Link öffnet, meldet sich an und wählt seinen Namen (oder tritt neu bei)
 - Ausgaben mit Betrag, Beschreibung, Kategorie (🍹 🍕 🎟️ 🚕 🏨 🛍️), zahlender Person, Beteiligten, Datum und Notiz
 - Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
-- **PayPal:** Jede Person hinterlegt ihren PayPal.me-Link einmal im Profil (eintippen, einfügen oder den PayPal-QR-Code scannen). In der Abrechnung öffnet ein Button PayPal direkt mit dem richtigen Betrag
+- **PayPal:** Jede Person trägt einmal im Profil ihre **PayPal-E-Mail-Adresse** ein (oder einen PayPal.me-Link). In der Abrechnung kopiert ein Button die Adresse und öffnet PayPal „Geld senden“. Bei PayPal.me ist der Betrag schon eingetragen
 - Zahlungen als erledigt markieren (und zurücknehmen), Verlauf aller Änderungen
 - **Abrechnung abschließen:** sperrt die Ausgaben und erzeugt ein **PDF** mit allen Infos und PayPal-QR-Codes. Das PDF lässt sich teilen oder speichern, die Zusammenfassung mit PayPal-Links per **WhatsApp** senden
 - Alle Daten zentral in MySQL; Änderungen anderer erscheinen automatisch (Aktualisierung alle 15 s und beim Zurückkehren in den Tab)
@@ -129,10 +129,17 @@ Aufgebaut wie in der Reiseapp:
 
 ## PayPal-Zahlungen
 
-- Im **Profil** trägt jede Person ihren PayPal.me-Link ein. Er gilt automatisch in allen ihren Events. Für Platzhalter ohne Konto kann man den Link unter **Teilnehmende** über „+ PayPal“ hinterlegen. Erlaubt sind `paypal.me/name`, `https://www.paypal.me/name`, `paypal.com/paypalme/name`, `@name` oder nur `name`. Gespeichert wird nur der Name.
-- **QR-Code:** In Browsern mit Barcode-Erkennung (z. B. Chrome auf Android) gibt es den Button „QR-Code scannen“: Foto vom PayPal-QR-Code machen, der Link wird eingetragen. Auf dem iPhone den QR-Code mit der Kamera-App scannen und den Link einfügen. QR-Codes, die keinen PayPal.me-Namen enthalten (`paypal.com/qrcodes/…`), werden mit einem Hinweis abgelehnt, weil sich damit kein Betrag vorbelegen lässt.
-- In der **Abrechnung** erscheint bei jeder Zahlung an eine Person mit PayPal.me-Link der Button „PayPal: 30,00 € senden“. Er öffnet `https://www.paypal.me/name/30.00EUR`, also PayPal mit Empfänger und Betrag schon ausgefüllt. Die Zahlung wird in PayPal bestätigt. Danach in FriendSplit „Als bezahlt markieren“. FriendSplit erfährt nicht automatisch, ob die Zahlung durchging.
-- Hat die empfangende Person noch keinen Link hinterlegt, zeigt die App das an. Ist man selbst die empfangende Person, gibt es einen Hinweis zum Hinterlegen.
+- **Eintragen:** Im **Profil** trägt jede Person ihre **PayPal-E-Mail-Adresse** ein, also die Adresse, mit der sie bei PayPal angemeldet ist. Alternativ geht ein PayPal.me-Link (`paypal.me/name`, `@name`, oder per QR-Scan). Das gilt in allen Events der Person. Für Platzhalter ohne Konto trägt man es unter **Teilnehmende** über „+ PayPal“ ein. Gespeichert wird entweder die E-Mail (`paypal_email`) oder der PayPal.me-Name (`paypal_me`).
+- **Bezahlen mit E-Mail-Adresse:**
+  - Standard ist **„PayPal: 30,00 € senden“**: Der Button kopiert die E-Mail-Adresse und öffnet PayPal „Geld senden“. Dort fügt man die Adresse ein, gibt den Betrag ein und wählt **„Freunde & Familie“**. Das ist kostenlos.
+  - Zusätzlich gibt es den kleinen Link **„Sofort bezahlen“**. Er öffnet PayPal mit Empfänger und Betrag schon ausgefüllt. Technisch ist das eine Zahlung „Waren & Dienstleistungen“: **Der Empfänger zahlt PayPal-Gebühren** (ca. 2,5 % + 0,35 €). Darauf weist die App hin.
+- **Bezahlen mit PayPal.me:** Der Button öffnet `paypal.me/name/30.00EUR`, Empfänger und Betrag sind schon eingetragen.
+- **PDF und WhatsApp:**
+  - Bei E-Mail-Adressen stehen Adresse und Anleitung „Freunde & Familie“ im PDF. Der QR-Code öffnet „Sofort bezahlen“, mit Gebühren-Hinweis.
+  - Bei PayPal.me öffnet der QR-Code den Link mit Betrag.
+  - Die WhatsApp-Nachricht nennt die E-Mail-Adresse bzw. den PayPal.me-Link.
+- **Sichtbarkeit:** Die PayPal-E-Mail-Adresse sehen alle Teilnehmenden der eigenen Events, sonst ließe sich das Geld nicht senden. Die Login-E-Mail-Adresse bleibt davon getrennt und unsichtbar.
+- Danach in FriendSplit „Als bezahlt markieren“. FriendSplit erfährt nicht automatisch, ob die Zahlung durchging.
 
 ## Abrechnung abschließen, PDF und WhatsApp
 
@@ -157,7 +164,7 @@ Aufgebaut wie in der Reiseapp:
 - **Event-Zugang:** Jedes Event hat einen zufälligen Zugangscode aus 12 Zeichen (≈ 60 Bit, ohne verwechselbare Zeichen wie 0/O, 1/I), z. B. `K7Q2-MX9P-4HTR`. Er steht nur im `#`-Teil des Links und landet dadurch nicht in Server-Logs oder Referrern. Jeder Datenbankzugriff ist auf das Event dieses Codes beschränkt.
 - **Personen:** Wer man in einem Event ist, ergibt sich aus dem Konto. Die Verknüpfung lässt sich unter *Teilnehmende* lösen („anderen Namen wählen“), falls man sich vertippt hat.
 - **Rechte im Event:** Alle Teilnehmenden dürfen alle Ausgaben anlegen, ändern und löschen. Dafür gibt es Transparenz: Jede Ausgabe zeigt, wer sie eingetragen und zuletzt geändert hat, und der **Verlauf** protokolliert jede Änderung. Löschungen müssen bestätigt werden.
-- Gespeichert werden Name, E-Mail-Adresse und Passwort-Hash des Kontos sowie freiwillig der PayPal.me-Name. Keine Telefonnummern oder Bankdaten. Die E-Mail-Adresse sehen andere Teilnehmende nicht. Der PayPal.me-Name ist für die Teilnehmenden deiner Events sichtbar.
+- Gespeichert werden Name, E-Mail-Adresse und Passwort-Hash des Kontos sowie freiwillig PayPal (E-Mail-Adresse oder PayPal.me-Name). Die PayPal-Angabe sehen die Teilnehmenden der eigenen Events. Keine Telefonnummern oder Bankdaten. Die E-Mail-Adresse sehen andere Teilnehmende nicht. Der PayPal.me-Name ist für die Teilnehmenden deiner Events sichtbar.
 
 ## Zuverlässigkeit
 

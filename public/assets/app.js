@@ -60,6 +60,15 @@ const amountInput = (cents) => (cents / 100).toFixed(2).replace('.', ',');
 
 /** PayPal.me-Link, der direkt mit dem Betrag in Euro öffnet, z. B. https://www.paypal.me/alex/12.34EUR */
 const paypalLink = (handle, cents) => `https://www.paypal.me/${encodeURIComponent(handle)}${cents ? `/${(cents / 100).toFixed(2)}EUR` : ''}`;
+/** PayPal „Geld senden“ – dort fügt man die kopierte E-Mail ein und wählt „Freunde & Familie“ (kostenlos). */
+const PAYPAL_SEND = 'https://www.paypal.com/myaccount/transfer/homepage/pay';
+/** Fertiger Zahlungslink an eine E-Mail-Adresse – technisch „Waren & Dienstleistungen“: Gebühren für den Empfänger. */
+const paypalInstantLink = (email, cents, note) => `https://www.paypal.com/cgi-bin/webscr?${new URLSearchParams({
+  cmd: '_xclick', business: email, amount: (cents / 100).toFixed(2), currency_code: 'EUR', ...(note ? { item_name: note } : {}),
+})}`;
+/** PayPal-Feld im Formular vorbelegen: E-Mail-Adresse oder PayPal.me-Link */
+const paypalValue = (p) => p.paypal_email ?? (p.paypal ? `paypal.me/${p.paypal}` : '');
+const hasPaypal = (p) => Boolean(p?.paypal || p?.paypal_email);
 const canScanQr = () => 'BarcodeDetector' in window;
 
 /** "42,50", "42.5", "1.234,56 €" → Cent als ganze Zahl; ungültig → null */
@@ -860,11 +869,10 @@ function viewProfile() {
     <section class="card section" aria-labelledby="paypal-heading">
       <h2 id="paypal-heading">PayPal</h2>
       <form id="profile-form" class="form" novalidate>
-        <div class="field"><label for="f-paypal">Dein PayPal.me-Link</label>
-          <input id="f-paypal" name="paypal" maxlength="200" value="${u.paypal ? `paypal.me/${u.paypal}` : ''}" placeholder="paypal.me/deinname"
-            inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
-          <p class="hint" id="hint-paypal">Gilt automatisch in allen deinen Events. Wer dir Geld schuldet, kann dir den Betrag in der Abrechnung mit einem Tipp per PayPal senden.
-            ${canScanQr() ? '' : 'Tipp: Deinen PayPal-QR-Code kannst du mit der Kamera-App scannen und den Link hier einfügen.'}</p>
+        <div class="field"><label for="f-paypal">Deine PayPal-E-Mail-Adresse</label>
+          <input id="f-paypal" name="paypal" maxlength="200" value="${paypalValue(u)}" placeholder="z. B. name@gmail.com"
+            type="text" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
+          <p class="hint" id="hint-paypal">Die Adresse, mit der du bei PayPal angemeldet bist. Wer dir Geld schuldet, sieht sie in der Abrechnung und im PDF und kann dir direkt etwas senden. Gilt in allen deinen Events. Ein PayPal.me-Link geht auch.</p>
           <p class="field-error" id="err-paypal"></p></div>
         ${u.paypal ? html`<p class="small">Test: <a href="${paypalLink(u.paypal, 0)}" target="_blank" rel="noopener noreferrer">paypal.me/${u.paypal}</a> öffnen</p>` : ''}
         <div class="form-actions">
@@ -1356,13 +1364,21 @@ function viewSettle() {
                 ${person(pay.to)?.paypal
                   ? html`<a class="btn btn--small btn--paypal ${pay.from === me ? 'btn--primary' : ''}" href="${paypalLink(person(pay.to).paypal, pay.amount_cents)}" target="_blank" rel="noopener noreferrer"
                       aria-label="${euro(pay.amount_cents)} per PayPal an ${personName(pay.to)} senden">PayPal: ${euro(pay.amount_cents)} senden</a>`
-                  : pay.to === me
-                    ? html`<a class="btn btn--small btn--ghost" href="#/profil">PayPal.me im Profil hinterlegen</a>`
-                    : html`<span class="muted small">${personName(pay.to)} hat keinen PayPal.me-Link hinterlegt</span>`}
+                  : person(pay.to)?.paypal_email
+                    ? html`<span class="paypal-mail">
+                        <button class="btn btn--small btn--paypal ${pay.from === me ? 'btn--primary' : ''}" data-action="paypal-email" data-to="${pay.to}" data-amount="${pay.amount_cents}"
+                          aria-label="${euro(pay.amount_cents)} per PayPal an ${personName(pay.to)} senden: E-Mail kopieren und PayPal öffnen">PayPal: ${euro(pay.amount_cents)} senden</button>
+                        <span class="muted small">an ${person(pay.to).paypal_email} ·
+                          <a href="${paypalInstantLink(person(pay.to).paypal_email, pay.amount_cents, `FriendSplit: ${S.data.event.name}`)}" target="_blank" rel="noopener noreferrer"
+                            title="Öffnet PayPal mit Empfänger und Betrag. Achtung: Waren & Dienstleistungen – der Empfänger zahlt Gebühren.">Sofort bezahlen (mit Gebühren für ${pay.to === me ? 'dich' : personName(pay.to)})</a></span>
+                      </span>`
+                    : pay.to === me
+                      ? html`<a class="btn btn--small btn--ghost" href="#/profil">PayPal im Profil hinterlegen</a>`
+                      : html`<span class="muted small">${personName(pay.to)} hat kein PayPal hinterlegt</span>`}
                 <button class="btn btn--small" data-action="settle" data-from="${pay.from}" data-to="${pay.to}" data-amount="${pay.amount_cents}">✓ Als bezahlt markieren</button>
               </div>
             </li>`)}</ol>
-            <p class="muted small">Der PayPal-Button öffnet PayPal mit dem Betrag schon eingetragen – du bestätigst die Zahlung dort. Danach hier „Als bezahlt markieren“. Die Vorschläge verändern keine Ausgaben.</p>`}
+            <p class="muted small">„PayPal senden“ öffnet PayPal – bei einem PayPal.me-Link mit dem Betrag schon eingetragen, bei einer E-Mail-Adresse wird die Adresse kopiert: in PayPal einfügen, Betrag eingeben, „Freunde & Familie“ wählen (kostenlos). Danach hier „Als bezahlt markieren“.</p>`}
     </section>
 
     <section aria-labelledby="bal-heading" class="section">
@@ -1445,8 +1461,9 @@ function whatsappText() {
     lines.push('*So gleichen wir aus:*');
     for (const pay of summary.plan) {
       lines.push(`• ${personName(pay.from)} → ${personName(pay.to)}: *${euro(pay.amount_cents)}*`);
-      const paypal = person(pay.to)?.paypal;
-      if (paypal) lines.push(`  PayPal: ${paypalLink(paypal, pay.amount_cents)}`);
+      const to = person(pay.to);
+      if (to?.paypal) lines.push(`  PayPal: ${paypalLink(to.paypal, pay.amount_cents)}`);
+      else if (to?.paypal_email) lines.push(`  PayPal an: ${to.paypal_email} (Freunde & Familie)`);
     }
   }
   lines.push('', `Alle Details: ${eventLink(event.code)}`);
@@ -1471,13 +1488,14 @@ function downloadBlob(blob, filename) {
 
 /** PayPal-Status einer Person: eigener Link → Profil, andere mit Konto → nur Anzeige, Platzhalter → bearbeitbar. */
 function paypalChip(p, me) {
-  const set = p.paypal ? 'paypal-chip--set' : '';
-  const label = p.paypal ? '✓ PayPal' : '+ PayPal';
+  const set = hasPaypal(p) ? 'paypal-chip--set' : '';
+  const label = hasPaypal(p) ? '✓ PayPal' : '+ PayPal';
+  const shown = paypalValue(p);
   if (p.id === me) return html`<a class="paypal-chip ${set}" href="#/profil" title="Im Profil ändern">${label}</a>`;
-  if (p.linked) return p.paypal ? html`<span class="paypal-chip ${set}" title="paypal.me/${p.paypal}">✓ PayPal</span>` : '';
+  if (p.linked) return hasPaypal(p) ? html`<span class="paypal-chip ${set}" title="${shown}">✓ PayPal</span>` : '';
   return html`<button class="paypal-chip ${set}" data-action="edit-paypal" data-id="${p.id}"
-    aria-label="${p.paypal ? `PayPal.me von ${p.name} ändern (${p.paypal})` : `PayPal.me für ${p.name} hinterlegen`}"
-    title="${p.paypal ? `paypal.me/${p.paypal}` : 'PayPal.me hinterlegen'}">${label}</button>`;
+    aria-label="${hasPaypal(p) ? `PayPal von ${p.name} ändern (${shown})` : `PayPal für ${p.name} hinterlegen`}"
+    title="${hasPaypal(p) ? shown : 'PayPal hinterlegen'}">${label}</button>`;
 }
 
 function viewPeople() {
@@ -1502,14 +1520,14 @@ function viewPeople() {
       ${participants.length === 0 ? html`<p class="muted">Noch keine Teilnehmenden – füge unten die erste Person hinzu.</p>` : ''}
       <ul class="list">${participants.map((p) => S.editingPaypal === p.id
         ? html`<li class="card"><form id="paypal-form" class="form" data-id="${p.id}" novalidate>
-            <div class="field"><label for="f-paypal">PayPal.me-Link von ${p.name}</label>
-              <input id="f-paypal" name="paypal" maxlength="200" value="${p.paypal ? `paypal.me/${p.paypal}` : ''}" placeholder="paypal.me/deinname"
-                inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
-              <p class="hint" id="hint-paypal">${p.name} hat noch kein Konto. Trag den PayPal.me-Link für ${p.name} ein, damit die anderen in der Abrechnung direkt per PayPal zahlen können. Sobald ${p.name} sich anmeldet, gilt der Link aus dem Profil.</p>
+            <div class="field"><label for="f-paypal">PayPal-E-Mail-Adresse von ${p.name}</label>
+              <input id="f-paypal" name="paypal" maxlength="200" value="${paypalValue(p)}" placeholder="z. B. name@gmail.com"
+                type="text" inputmode="email" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="hint-paypal err-paypal">
+              <p class="hint" id="hint-paypal">${p.name} hat noch kein Konto. Trag die PayPal-E-Mail-Adresse (oder einen PayPal.me-Link) von ${p.name} ein, damit die anderen in der Abrechnung direkt per PayPal zahlen können. Sobald ${p.name} sich anmeldet, gilt das Profil.</p>
               <p class="field-error" id="err-paypal"></p></div>
             <div class="form-actions">
               ${canScanQr() ? html`<label class="btn">📷 QR-Code scannen<input type="file" id="f-paypal-qr" accept="image/*" capture="environment" class="visually-hidden"></label>` : ''}
-              ${p.paypal ? html`<button class="btn btn--ghost btn--danger-ghost" type="button" data-action="remove-paypal" data-id="${p.id}">Entfernen</button>` : ''}
+              ${hasPaypal(p) ? html`<button class="btn btn--ghost btn--danger-ghost" type="button" data-action="remove-paypal" data-id="${p.id}">Entfernen</button>` : ''}
               <button class="btn" type="button" data-action="cancel-paypal">Abbrechen</button>
               <button class="btn btn--primary" type="submit">Speichern</button>
             </div></form></li>`
@@ -1756,6 +1774,16 @@ const actions = {
     }
     copyText(url, 'Einladungslink kopiert');
   },
+  'paypal-email': async (el) => {
+    const to = person(el.dataset.to);
+    const amount = euro(Number(el.dataset.amount));
+    // Erst kopieren (braucht den Klick), dann PayPal öffnen – beides im selben Tipp.
+    const copied = navigator.clipboard?.writeText(to.paypal_email).then(() => true, () => false) ?? Promise.resolve(false);
+    window.open(PAYPAL_SEND, '_blank', 'noopener');
+    toast((await copied)
+      ? `E-Mail von ${to.name} kopiert. In PayPal einfügen, ${amount} eingeben und „Freunde & Familie“ wählen.`
+      : `In PayPal an ${to.paypal_email} senden: ${amount}, „Freunde & Familie“ wählen.`);
+  },
   'close-event': async (el) => {
     const ok = await confirmDialog({ title: 'Abrechnung abschließen?', text: 'Danach lassen sich keine Ausgaben mehr hinzufügen, ändern oder löschen – bis jemand die Abrechnung wieder öffnet. Zahlungen könnt ihr weiterhin als bezahlt markieren.', confirm: 'Abschließen' });
     if (!ok) return;
@@ -1868,7 +1896,7 @@ const actions = {
   'edit-paypal': (el) => { S.editingPaypal = el.dataset.id; S.renaming = null; render(); document.getElementById('f-paypal')?.focus(); },
   'cancel-paypal': () => { S.editingPaypal = null; render(); },
   'remove-paypal': async (el) => {
-    const result = await mutate('set_paypal', { person_id: el.dataset.id, paypal: '' }, { success: 'PayPal.me-Link entfernt', button: el });
+    const result = await mutate('set_paypal', { person_id: el.dataset.id, paypal: '' }, { success: 'PayPal entfernt', button: el });
     if (result) { S.editingPaypal = null; render(); }
   },
   rename: (el) => { S.renaming = el.dataset.id; S.editingPaypal = null; render(); document.getElementById('f-rename')?.select(); },
@@ -2127,7 +2155,7 @@ const forms = {
       S.user = (await api('update_profile', { body: { paypal } })).user;
       if (S.code) await loadEvent({ silent: true });
       render();
-      toast(paypal ? 'PayPal.me-Link gespeichert' : 'PayPal.me-Link entfernt');
+      toast(paypal ? 'PayPal gespeichert' : 'PayPal entfernt');
     } catch (error) {
       setBusy(button, false);
       if (error.fields) showFieldErrors(form, error.fields);
@@ -2238,7 +2266,7 @@ const forms = {
       S.editingPaypal = null;
       applyState(result.state);
       render();
-      toast(paypal ? 'PayPal.me-Link gespeichert' : 'PayPal.me-Link entfernt');
+      toast(paypal ? 'PayPal gespeichert' : 'PayPal entfernt');
     } catch (error) {
       setBusy(button, false);
       if (error.fields) showFieldErrors(form, error.fields);

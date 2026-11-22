@@ -636,10 +636,28 @@ test('PayPal.me: im Profil und für Platzhalter', function () use (&$code, &$ids
     $r = call('set_paypal', ['person_id' => $lena, 'paypal' => 'paypal.me/LenaK'], $code);
     assertSame(200, $r['status']);
     assertSame('LenaK', paypalOf($r['body']['data']['state'], 'Lena'));
-    assertTrue(str_contains($r['body']['data']['state']['activity'][0]['summary'], 'Alex hat einen für Lena'));
+    assertTrue(str_contains($r['body']['data']['state']['activity'][0]['summary'], 'Alex hat für Lena PayPal hinterlegt'));
     assertSame(422, call('set_paypal', ['person_id' => $lena, 'paypal' => 'kein name'], $code)['status']);
     assertSame(404, call('set_paypal', ['person_id' => 'gibtsnicht', 'paypal' => 'x'], $code)['status']);
     assertSame(200, call('remove_participant', ['person_id' => $lena], $code)['status']);
+});
+
+test('PayPal per E-Mail-Adresse', function () use (&$code, &$ids) {
+    $r = call('update_profile', ['paypal' => '  Alex.PayPal@Example.TEST ']);
+    assertSame(200, $r['status']);
+    assertSame([null, 'alex.paypal@example.test'], [$r['body']['data']['user']['paypal'], $r['body']['data']['user']['paypal_email']]);
+    $alex = array_values(array_filter(call('event', null, $code)['body']['data']['participants'], fn ($p) => $p['name'] === 'Alex'))[0];
+    assertSame([null, 'alex.paypal@example.test'], [$alex['paypal'], $alex['paypal_email']], 'gilt im Event');
+    assertSame(422, call('update_profile', ['paypal' => 'kein@mail'])['status']);
+    // Wechsel zurück auf PayPal.me löscht die E-Mail
+    $r = call('update_profile', ['paypal' => 'paypal.me/AlexM']);
+    assertSame(['AlexM', null], [$r['body']['data']['user']['paypal'], $r['body']['data']['user']['paypal_email']]);
+    // Platzhalter ohne Konto
+    $lena = call('add_participant', ['name' => 'Lena'], $code)['body']['data']['person_id'];
+    $r = call('set_paypal', ['person_id' => $lena, 'paypal' => 'lena@example.test'], $code);
+    $p = array_values(array_filter($r['body']['data']['state']['participants'], fn ($x) => $x['id'] === $lena))[0];
+    assertSame([null, 'lena@example.test'], [$p['paypal'], $p['paypal_email']]);
+    call('remove_participant', ['person_id' => $lena], $code);
 });
 
 test('Zugriff ist auf das eigene Event beschränkt', function () use (&$code, &$ids) {

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS fs_persons (
   id           TEXT NOT NULL PRIMARY KEY,
   display_name TEXT NOT NULL,
   paypal_me    TEXT NULL,
+  paypal_email TEXT NULL,
   auth_user_id TEXT NULL,
   created_at   TEXT NOT NULL
 );
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS fs_users (
   password_hash     TEXT    NOT NULL,
   role              TEXT    NOT NULL DEFAULT 'user',
   paypal_me         TEXT    NULL,
+  paypal_email      TEXT    NULL,
   email_verified_at TEXT    NULL,
   blocked           INTEGER NOT NULL DEFAULT 0,
   last_login_at     TEXT    NULL,
