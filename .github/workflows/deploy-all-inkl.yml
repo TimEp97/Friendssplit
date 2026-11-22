@@ -6,7 +6,7 @@
 #   3. MariaDB-Datenbank (Name = Benutzer, z. B. d0xxxxxx)
 #
 # Dann in GitHub → Settings → Secrets and variables → Actions:
-#   KEY_FRIENDSPLIT  Passwort des FTP-Benutzers (alternativ FTP_PASSWORD)
+#   KEY_FRIENDSPLIT  Passwort des FTP-Benutzers (alternativ KEY_FRIENSSPLIT oder FTP_PASSWORD)
 #   (FTP-Benutzer f018eadd steht unten unter env – auf /friendssplitt.stuttgartapps.de/ beschränkt, daher Zielordner ./)
 #   DB_NAME          Datenbankname aus Schritt 3 (z. B. d0xxxxxx)
 #   DB_PASSWORD      optional: Datenbank-Passwort (sonst gilt KEY_FRIENDSPLIT – wenn du dasselbe Passwort vergibst)
@@ -54,7 +54,7 @@ jobs:
         id: creds
         if: github.ref_name == github.event.repository.default_branch
         env:
-          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT }}
           DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
         run: |
           missing=""
@@ -73,7 +73,7 @@ jobs:
         if: steps.creds.outputs.ok == 'true'
         env:
           DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.FTP_PASSWORD }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT || secrets.FTP_PASSWORD }}
           SETUP_CODE: ${{ secrets.SETUP_CODE }}
         run: |
           # Werte über var_export als sichere PHP-Zeichenketten einsetzen
@@ -101,7 +101,7 @@ jobs:
         with:
           server: ${{ env.FTP_SERVER }}
           username: ${{ env.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
+          password: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT }}
           protocol: ftps
           local-dir: ./public/
           server-dir: ${{ env.FTP_DIR }}
