@@ -6,18 +6,21 @@ final class Db
     /** @param array{dsn:string,user?:string|null,password?:string|null} $config */
     public static function connect(array $config): PDO
     {
-        $pdo = new PDO($config['dsn'], $config['user'] ?? null, $config['password'] ?? null, [
+        $options = [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES => false,
             PDO::ATTR_STRINGIFY_FETCHES => false,
-        ]);
-        if (self::driver($pdo) === 'sqlite') {
+        ];
+        $mysql = str_starts_with($config['dsn'], 'mysql:');
+        if ($mysql) {
+            // Zeichensatz und Zeitzone gleich beim Verbinden setzen – eine Abfrage statt zwei zusätzlicher.
+            $options[PDO::MYSQL_ATTR_INIT_COMMAND] = "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci, time_zone = '+00:00'";
+        }
+        $pdo = new PDO($config['dsn'], $config['user'] ?? null, $config['password'] ?? null, $options);
+        if (!$mysql) {
             $pdo->exec('PRAGMA foreign_keys = ON');
             $pdo->exec('PRAGMA busy_timeout = 5000');
-        } else {
-            $pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
-            $pdo->exec("SET time_zone = '+00:00'");
         }
         return $pdo;
     }
