@@ -1,7 +1,7 @@
-# Testet FriendSplit und lädt es per FTPS auf den All-Inkl-Webspace (friendsplit.stuttgartapps.de).
+# Testet FriendSplit und lädt es per FTPS auf den All-Inkl-Webspace (friendssplitt.stuttgartapps.de).
 #
 # Einmalig im KAS anlegen (wie bei der Reiseapp):
-#   1. Subdomain friendsplit.stuttgartapps.de mit SSL
+#   1. Subdomain friendssplitt.stuttgartapps.de mit SSL
 #   2. FTP-Benutzer, beschränkt auf den Ordner der Subdomain
 #   3. MariaDB-Datenbank (Name = Benutzer, z. B. d0xxxxxx)
 #
@@ -12,6 +12,7 @@
 #   DB_PASSWORD      optional: Datenbank-Passwort (sonst gilt KEY_FRIENDSPLIT – wenn du dasselbe Passwort vergibst)
 #   SETUP_CODE       optional: Code zum Anlegen des ersten Kontos, mind. 12 Zeichen (sonst gilt das Datenbank-Passwort)
 # Server und Zielordner stehen unten unter env (keine Geheimnisse; per Secret FTP_SERVER, FTP_DIR überschreibbar).
+# Alle Werte dürfen statt unter „Secrets“ auch unter „Variables“ stehen (Passwörter bitte als Secret).
 #
 # api/config.php entsteht beim Upload aus diesen Secrets – sie liegt nie im Repository.
 # Läuft bei jedem Push auf den Haupt-Branch und lässt sich unter „Actions“ auch von Hand starten.
@@ -27,9 +28,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  APP_URL: https://friendsplit.stuttgartapps.de/
-  FTP_SERVER: ${{ secrets.FTP_SERVER || 'w0222c40.kasserver.com' }}
-  FTP_DIR: ${{ secrets.FTP_DIR || './' }}
+  APP_URL: ${{ vars.APP_URL || 'https://friendssplitt.stuttgartapps.de/' }}
+  FTP_SERVER: ${{ secrets.FTP_SERVER || vars.FTP_SERVER || 'w0222c40.kasserver.com' }}
+  FTP_DIR: ${{ secrets.FTP_DIR || vars.FTP_DIR || './' }}
   MAIL_FROM: noreply@stuttgartapps.de
 
 jobs:
@@ -52,9 +53,9 @@ jobs:
         id: creds
         if: github.ref_name == github.event.repository.default_branch
         env:
-          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME || vars.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
-          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
         run: |
           missing=""
           [ -n "$FTP_USERNAME" ] || missing="$missing FTP_USERNAME"
@@ -71,7 +72,7 @@ jobs:
       - name: Server-Konfiguration schreiben
         if: steps.creds.outputs.ok == 'true'
         env:
-          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.FTP_PASSWORD }}
           SETUP_CODE: ${{ secrets.SETUP_CODE }}
         run: |
@@ -99,7 +100,7 @@ jobs:
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ env.FTP_SERVER }}
-          username: ${{ secrets.FTP_USERNAME }}
+          username: ${{ secrets.FTP_USERNAME || vars.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
           protocol: ftps
           local-dir: ./public/
