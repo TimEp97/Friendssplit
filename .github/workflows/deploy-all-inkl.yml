@@ -100,6 +100,13 @@ jobs:
           php -l public/api/config.php
           echo "config.php geschrieben (Datenbank $DB_NAME, $APP_URL)"
 
+      - name: Version an CSS/JS hängen (Browser-Cache)
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          v="${GITHUB_SHA::8}"
+          sed -i "s#assets/app.css\"#assets/app.css?v=$v\"#; s#assets/app.js\"#assets/app.js?v=$v\"#; s#assets/icon.svg\"#assets/icon.svg?v=$v\"#" public/index.html
+          grep -n '?v=' public/index.html
+
       - name: Per FTPS hochladen
         if: steps.creds.outputs.ok == 'true'
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5

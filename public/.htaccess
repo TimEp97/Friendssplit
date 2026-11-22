@@ -16,7 +16,17 @@ DirectoryIndex index.html
   Header always set X-Frame-Options "SAMEORIGIN"
   Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
   Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'"
-  <FilesMatch "\.(css|js)$">
+  # CSS/JS: Der Upload hängt ?v=<Version> an (siehe index.html). Mit Version darf der Browser die Datei
+  # ein Jahr behalten – nach einem Update ändert sich die Adresse. Ohne Version (Upload von Hand) immer nachfragen.
+  <FilesMatch "\.(css|js|svg)$">
+    <If "%{QUERY_STRING} =~ /^v=/">
+      Header set Cache-Control "public, max-age=31536000, immutable"
+    </If>
+    <Else>
+      Header set Cache-Control "no-cache"
+    </Else>
+  </FilesMatch>
+  <FilesMatch "\.html$">
     Header set Cache-Control "no-cache"
   </FilesMatch>
 </IfModule>

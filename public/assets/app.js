@@ -126,6 +126,35 @@ const local = {
   remove(key) { try { localStorage.removeItem(key); } catch { /* ignorieren */ } },
 };
 const lastEventCode = () => local.get('fs.lastEvent', null);
+
+/**
+ * Letzter bekannter Stand auf diesem Gerät (Konto und die zuletzt geöffneten Events). Damit zeigt die App
+ * beim Öffnen sofort etwas an und holt den aktuellen Stand im Hintergrund. Beim Abmelden wird alles gelöscht.
+ */
+const MAX_CACHED_EVENTS = 5;
+let savedUserJson = '';
+const cache = {
+  user: () => local.get('fs.user', null),
+  saveUser(user) {
+    const json = JSON.stringify(user ?? null);
+    if (json === savedUserJson) return;
+    savedUserJson = json;
+    if (user) local.set('fs.user', user); else local.remove('fs.user');
+  },
+  state: (code) => local.get(`fs.state.${code}`, null),
+  saveState(data) {
+    const code = data.event.code;
+    local.set(`fs.state.${code}`, data);
+    const codes = [code, ...local.get('fs.states', []).filter((c) => c !== code)];
+    codes.slice(MAX_CACHED_EVENTS).forEach((c) => local.remove(`fs.state.${c}`));
+    local.set('fs.states', codes.slice(0, MAX_CACHED_EVENTS));
+  },
+  clear() {
+    local.get('fs.states', []).forEach((c) => local.remove(`fs.state.${c}`));
+    ['fs.states', 'fs.user', 'fs.lastEvent'].forEach((k) => local.remove(k));
+    savedUserJson = '';
+  },
+};
 /** Ziel nach der Anmeldung merken – auch über den Bestätigungslink in einem neuen Tab hinweg. */
 const rememberAfterLogin = (hash) => (hash && hash.startsWith('#/e/') ? local.set('fs.afterLogin', hash) : local.remove('fs.afterLogin'));
 function takeAfterLogin() {
@@ -173,6 +202,7 @@ async function api(action, { body = null, code = null, params = {} } = {}) {
     if (e.code === 'not_authenticated' && S.user) {
       // Sitzung abgelaufen oder anderswo abgemeldet → zur Anmeldung
       S.user = null;
+      cache.clear();
       rememberAfterLogin(location.hash);
       setTimeout(() => go('#/login'), 0);
     }
@@ -221,13 +251,14 @@ const personName = (id) => person(id)?.name ?? 'Ehemalige Person';
 const avatarClass = (id) => `avatar avatar--c${[...String(id)].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % 8}`;
 const avatar = (id, name) => html`<span class="${avatarClass(id)}" aria-hidden="true">${(name || '?').trim().charAt(0).toUpperCase()}</span>`;
 
-function applyState(data) {
+function applyState(data, { fromCache = false } = {}) {
   const json = JSON.stringify(data);
   const changed = json !== S.dataJson;
   S.data = data;
   S.dataJson = json;
   S.stale = false;
   local.set('fs.lastEvent', data.event.code);
+  if (!fromCache) cache.saveState(data);
   if (S.user && data.me && !S.user.events.some((e) => e.code === data.event.code)) {
     S.user.events.unshift({ code: data.event.code, name: data.event.name, date: data.event.date });
   }
@@ -250,6 +281,16 @@ async function loadEvent({ silent = false } = {}) {
   } finally {
     if (code === S.code) S.loading = false;
   }
+}
+
+/** Aktuellen Stand nachladen, nachdem der gespeicherte schon angezeigt wird. */
+async function refreshEvent(route) {
+  const changed = await loadEvent({ silent: true });
+  if (!changed || S.route !== route || !S.data) return;
+  const me = person(getMe(S.code));
+  if (route.name === 'wer' && me) location.replace(eventPath());
+  else if (route.name !== 'wer' && !me) { S.afterPick = location.hash; location.replace(eventPath('wer')); }
+  else if (!isBusyEditing()) render();
 }
 
 // ---------------------------------------------------------------- Routing
@@ -333,8 +374,16 @@ async function loadFor(route) {
 async function onRoute() {
   let route = parseRoute();
   if (S.user === undefined) {
-    try { await loadUser(); } catch (error) { main.innerHTML = String(viewOffline(error)); return; }
-    route = parseRoute();
+    const cachedUser = cache.user();
+    if (cachedUser) {
+      // Sofort mit dem bekannten Konto loslegen, im Hintergrund prüfen (abgemeldet → api() leitet zur Anmeldung).
+      S.user = cachedUser;
+      savedUserJson = JSON.stringify(cachedUser);
+      api('me').then((d) => { S.user = d.user; if (!isBusyEditing() && !S.route.code) render(); }).catch(() => {});
+    } else {
+      try { await loadUser(); } catch (error) { main.innerHTML = String(viewOffline(error)); return; }
+      route = parseRoute();
+    }
   }
   // Ohne Anmeldung nur Login, Registrierung und E-Mail-Links; angemeldet keine Login-Seiten.
   if (!S.user && !PUBLIC_ROUTES.includes(route.name)) {
@@ -369,6 +418,10 @@ async function onRoute() {
     }
     if (!S.data && !CODE_ALPHABET.test(route.code)) {
       S.loadError = new ApiError('event_not_found', 'Dieser Link enthält keinen gültigen Event-Code.');
+    } else if (!S.data && cache.state(route.code)) {
+      // Letzten Stand sofort zeigen, aktuellen im Hintergrund holen
+      applyState(cache.state(route.code), { fromCache: true });
+      refreshEvent(route);
     } else if (!S.data) {
       render();
       await loadEvent();
@@ -396,6 +449,7 @@ async function onRoute() {
 // ---------------------------------------------------------------- Rendering
 
 function render() {
+  cache.saveUser(S.user);
   const views = {
     home: viewHome, create: viewCreate, wer: viewPicker, ausgaben: viewExpenses, abrechnung: viewSettle, personen: viewPeople, expense: viewExpenseForm,
     login: viewLogin, setup: viewSetup, register: viewRegister, code: viewCode, forgot: viewForgot, verify: viewVerify, reset: viewReset,
@@ -1611,6 +1665,7 @@ const actions = {
     setBusy(el, true, 'Abmelden …');
     try { await api('logout', { body: {} }); } catch { /* trotzdem lokal abmelden */ }
     Object.assign(S, { user: null, data: null, code: null, dataJson: '', friends: null, invites: null, permanentInvite: null, adminUsers: null, search: { q: '', results: [] } });
+    cache.clear();
     go('#/login');
     toast('Du bist abgemeldet.');
   },
@@ -1947,7 +2002,7 @@ const forms = {
       await api('delete_account', { body: { current_password: password } });
       S.user = null;
       S.data = null; S.code = null; S.dataJson = '';
-      local.remove('fs.lastEvent');
+      cache.clear();
       go('#/login');
       toast('Dein Konto wurde gelöscht.');
     } catch (error) {
