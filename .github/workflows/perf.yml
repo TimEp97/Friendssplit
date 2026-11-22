@@ -32,3 +32,8 @@ jobs:
           echo "== Wiederholter Abruf app.js mit ETag (sollte 304 sein)"
           etag=$(curl -s -D - -o /dev/null "${BASE}assets/app.js" | grep -i '^etag' | cut -d' ' -f2- | tr -d '\r')
           curl -s -o /dev/null -H "If-None-Match: $etag" -w "$fmt" "${BASE}assets/app.js"
+          echo "== Versionierte Dateien aus index.html (sollten lange im Browser bleiben)"
+          for asset in $(curl -s "$BASE" | grep -oE 'assets/[a-z.]+\?v=[0-9a-f]+'); do
+            echo "-- $asset"
+            curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip, br' "$BASE$asset" | grep -iE '^(HTTP|cache-control|content-encoding)'
+          done
