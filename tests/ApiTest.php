@@ -764,6 +764,35 @@ test('Freunde direkt ins Event holen', function () {
     assertTrue(str_contains($r['body']['data']['state']['activity'][0]['summary'], 'Sam hat Gina hinzugefügt'));
 });
 
+test('Abrechnung abschließen sperrt Ausgaben, Zahlungen bleiben möglich', function () use (&$code, &$ids) {
+    $r = call('close_event', [], $code, 'Sam');
+    assertSame(200, $r['status']);
+    $state = $r['body']['data']['state'];
+    assertTrue($state['event']['closed_at'] !== null, 'abgeschlossen');
+    assertSame($ids['Sam'], $state['event']['closed_by']);
+    assertTrue(str_contains($state['activity'][0]['summary'], 'Sam hat die Abrechnung abgeschlossen'));
+
+    $r = call('save_expense', [
+        'amount_cents' => 500, 'category' => 'essen', 'paid_by' => $ids['Alex'],
+        'participants' => [$ids['Alex']], 'spent_at' => '2026-10-24T02:00',
+    ], $code);
+    assertSame(409, $r['status']);
+    assertSame('event_closed', $r['body']['error']['code']);
+    $expense = $state['expenses'][0];
+    assertSame(409, call('delete_expense', ['id' => $expense['id'], 'version' => $expense['version']], $code)['status']);
+
+    // Ausgleich bleibt möglich
+    $pay = $state['summary']['plan'][0];
+    $r = call('add_settlement', ['from' => $pay['from'], 'to' => $pay['to'], 'amount_cents' => $pay['amount_cents']], $code);
+    assertSame(200, $r['status']);
+    call('delete_settlement', ['id' => $r['body']['data']['state']['settlements'][0]['id']], $code);
+
+    assertSame(200, call('close_event', [], $code)['status'], 'zweimal schließen ist harmlos');
+    $r = call('reopen_event', [], $code, 'Alex');
+    assertSame(null, $r['body']['data']['state']['event']['closed_at']);
+    assertTrue(str_contains($r['body']['data']['state']['activity'][0]['summary'], 'Alex hat die Abrechnung wieder geöffnet'));
+});
+
 test('Methoden und Aktionen', function () use (&$code) {
     global $port, $sessions;
     $raw = file_get_contents("http://127.0.0.1:$port/api/index.php?action=delete_expense", false, stream_context_create(['http' => [

@@ -10,6 +10,7 @@ Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen
 - Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
 - **PayPal:** Jede Person hinterlegt ihren PayPal.me-Link einmal im Profil (eintippen, einfügen oder den PayPal-QR-Code scannen). In der Abrechnung öffnet ein Button PayPal direkt mit dem richtigen Betrag
 - Zahlungen als erledigt markieren (und zurücknehmen), Verlauf aller Änderungen
+- **Abrechnung abschließen:** sperrt die Ausgaben und erzeugt ein **PDF** mit allen Infos und PayPal-QR-Codes. Das PDF lässt sich teilen oder speichern, die Zusammenfassung mit PayPal-Links per **WhatsApp** senden
 - Alle Daten zentral in MySQL; Änderungen anderer erscheinen automatisch (Aktualisierung alle 15 s und beim Zurückkehren in den Tab)
 
 ## Technik – warum so?
@@ -133,6 +134,23 @@ Aufgebaut wie in der Reiseapp:
 - In der **Abrechnung** erscheint bei jeder Zahlung an eine Person mit PayPal.me-Link der Button „PayPal: 30,00 € senden“. Er öffnet `https://www.paypal.me/name/30.00EUR`, also PayPal mit Empfänger und Betrag schon ausgefüllt. Die Zahlung wird in PayPal bestätigt. Danach in FriendSplit „Als bezahlt markieren“. FriendSplit erfährt nicht automatisch, ob die Zahlung durchging.
 - Hat die empfangende Person noch keinen Link hinterlegt, zeigt die App das an. Ist man selbst die empfangende Person, gibt es einen Hinweis zum Hinterlegen.
 
+## Abrechnung abschließen, PDF und WhatsApp
+
+- Unter **Abrechnung** gibt es **„Abrechnung abschließen“**, sobald Ausgaben eingetragen sind.
+  - Danach lassen sich Ausgaben nicht mehr hinzufügen, ändern oder löschen. Der Server lehnt das mit `event_closed` ab.
+  - Ausgleichszahlungen kann man weiterhin als bezahlt markieren.
+  - „Wieder öffnen“ hebt die Sperre auf. Beides steht im Verlauf.
+- **PDF:** wird direkt im Browser erzeugt (`assets/pdf.js`, eigener kleiner PDF-Schreiber mit Helvetica, Umlauten und €), ohne externe Dienste. Es enthält:
+  - Eventdaten und Kennzahlen
+  - „So gleicht ihr aus“, je Zahlung mit **PayPal-QR-Code** und anklickbarem PayPal.me-Link (Betrag schon eingetragen), falls die empfangende Person einen hinterlegt hat
+  - Salden je Person
+  - alle Ausgaben mit Beteiligten und Notizen
+  - erledigte Zahlungen und einen Link zum Event
+
+  Die QR-Codes erzeugt `assets/qrcode.js` (qrcode-generator von Kazuhiko Arase, MIT-Lizenz). Beide Dateien lädt die App erst beim Klick.
+- **PDF teilen:** öffnet am Handy das Teilen-Menü, z. B. für WhatsApp. Wo das nicht geht, wird das PDF gespeichert. **PDF speichern** lädt es direkt herunter.
+- **Per WhatsApp senden:** öffnet WhatsApp mit einer fertigen Nachricht: Ergebnis, wer wem wie viel zahlt, die PayPal-Links und der Link zum Event.
+
 ## Zugriff, Berechtigungen und Datenschutz
 
 - **Anmeldung:** Siehe *Konten und Anmeldung*. Änderungen in einem Event darf nur, wer daran teilnimmt.
@@ -180,6 +198,7 @@ Aufgebaut wie in der Reiseapp:
 | `save_expense` | POST | Ausgabe anlegen (`client_token`) oder ändern (`id` + `version`) |
 | `delete_expense` | POST | Ausgabe löschen (`id` + `version`) |
 | `add_settlement` / `delete_settlement` | POST | Ausgleichszahlung als erledigt markieren bzw. zurücknehmen |
+| `close_event` / `reopen_event` | POST | Abrechnung abschließen (Ausgaben gesperrt) bzw. wieder öffnen |
 
 Jede Änderung antwortet mit dem neuen Gesamtzustand. Fehler kommen als `{ ok: false, error: { code, message, fields? } }` mit passendem HTTP-Status (404, 409, 422, …).
 
