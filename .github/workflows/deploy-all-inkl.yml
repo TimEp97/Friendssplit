@@ -1,53 +1,120 @@
-# FriendSplit auf den ALL-INKL-Webspace hochladen.
+# Testet FriendSplit und lädt es per FTPS auf den All-Inkl-Webspace (friendsplit.stuttgartapps.de).
 #
-# Startet nur von Hand: GitHub → Actions → „Deploy zu ALL-INKL“ → „Run workflow“.
-# Erst laufen die Tests, nur wenn sie grün sind, wird per FTPS (verschlüsseltes FTP) hochgeladen.
+# Einmalig im KAS anlegen (wie bei der Reiseapp):
+#   1. Subdomain friendsplit.stuttgartapps.de mit SSL
+#   2. FTP-Benutzer, beschränkt auf den Ordner der Subdomain
+#   3. MariaDB-Datenbank (Name = Benutzer, z. B. d0xxxxxx)
 #
-# Einmalig unter Settings → Secrets and variables → Actions → „New repository secret“ anlegen:
-#   FTP_SERVER     z. B. w0123456.kasserver.com  (KAS → FTP)
-#   FTP_USERNAME   FTP-Benutzer, z. B. w0123456 oder ein eigener FTP-Zugang
-#   FTP_PASSWORD   Passwort des FTP-Benutzers
-#   FTP_DIR        Zielordner mit / am Ende, z. B. /friendsplit/ oder /deine-domain.de/friendsplit/
+# Dann in GitHub → Settings → Secrets and variables → Actions:
+#   KEY_FRIENDSPLIT  Passwort des FTP-Benutzers (alternativ FTP_PASSWORD)
+#   FTP_USERNAME     der FTP-Benutzer aus Schritt 2 (z. B. f0xxxxxx)
+#   DB_NAME          Datenbankname aus Schritt 3 (z. B. d0xxxxxx)
+#   DB_PASSWORD      optional: Datenbank-Passwort (sonst gilt KEY_FRIENDSPLIT – wenn du dasselbe Passwort vergibst)
+#   SETUP_CODE       optional: Code zum Anlegen des ersten Kontos, mind. 12 Zeichen (sonst gilt das Datenbank-Passwort)
+# Server und Zielordner stehen unten unter env (keine Geheimnisse; per Secret FTP_SERVER, FTP_DIR überschreibbar).
 #
-# api/config.php wird nie hochgeladen oder überschrieben (liegt nicht im Repository).
+# api/config.php entsteht beim Upload aus diesen Secrets – sie liegt nie im Repository.
+# Läuft bei jedem Push auf den Haupt-Branch und lässt sich unter „Actions“ auch von Hand starten.
 name: Deploy zu ALL-INKL
 
 on:
+  push:
+    branches: [claude/friendsplit-mvp, main]
   workflow_dispatch:
 
 concurrency:
   group: deploy-all-inkl
   cancel-in-progress: false
 
+env:
+  APP_URL: https://friendsplit.stuttgartapps.de/
+  FTP_SERVER: ${{ secrets.FTP_SERVER || 'w0222c40.kasserver.com' }}
+  FTP_DIR: ${{ secrets.FTP_DIR || './' }}
+  MAIL_FROM: noreply@stuttgartapps.de
+
 jobs:
-  test:
+  deploy:
+    # Nur vom Standard-Branch hochladen (Pushes auf andere Branches testen nur)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
       - name: PHP-Version
         run: php -v && php -m | grep -i -E 'pdo_sqlite|mbstring'
+
       - name: Rechenlogik testen
         run: php tests/SplitTest.php
+
       - name: API testen
         run: php tests/ApiTest.php
 
-  deploy:
-    needs: test
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - name: Hochladen per FTPS
+      - name: Zugangsdaten vorhanden?
+        id: creds
+        if: github.ref_name == github.event.repository.default_branch
+        env:
+          FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+          FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          missing=""
+          [ -n "$FTP_USERNAME" ] || missing="$missing FTP_USERNAME"
+          [ -n "$FTP_PASSWORD" ] || missing="$missing KEY_FRIENDSPLIT"
+          [ -n "$DB_NAME" ] || missing="$missing DB_NAME"
+          if [ -z "$missing" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "Zugangsdaten gefunden: $FTP_USERNAME@$FTP_SERVER, Zielordner $FTP_DIR, Datenbank $DB_NAME"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Es fehlen die Repository-Secrets:$missing – Tests sind grün, Upload übersprungen."
+          fi
+
+      - name: Server-Konfiguration schreiben
+        if: steps.creds.outputs.ok == 'true'
+        env:
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.FTP_PASSWORD }}
+          SETUP_CODE: ${{ secrets.SETUP_CODE }}
+        run: |
+          # Werte über var_export als sichere PHP-Zeichenketten einsetzen
+          php -r '
+            $config = [
+              "db" => [
+                "dsn" => "mysql:host=localhost;dbname=" . getenv("DB_NAME") . ";charset=utf8mb4",
+                "user" => getenv("DB_NAME"),
+                "password" => getenv("DB_PASSWORD"),
+              ],
+              "app_url" => getenv("APP_URL"),
+              "mail" => ["transport" => "mail", "from" => getenv("MAIL_FROM"), "from_name" => "FriendSplit"],
+              "setup_code" => getenv("SETUP_CODE"),
+              "setup_key" => "",
+              "auto_migrate" => true,
+            ];
+            echo "<?php\n// Automatisch beim Upload erzeugt (GitHub Actions). Nicht von Hand ändern.\nreturn " . var_export($config, true) . ";\n";
+          ' > public/api/config.php
+          php -l public/api/config.php
+          echo "config.php geschrieben (Datenbank $DB_NAME, $APP_URL)"
+
+      - name: Per FTPS hochladen
+        if: steps.creds.outputs.ok == 'true'
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
-          server: ${{ secrets.FTP_SERVER }}
+          server: ${{ env.FTP_SERVER }}
           username: ${{ secrets.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD }}
+          password: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
           protocol: ftps
           local-dir: ./public/
-          server-dir: ${{ secrets.FTP_DIR }}
+          server-dir: ${{ env.FTP_DIR }}
           exclude: |
             **/.git*
             **/.git*/**
-            api/config.php
             data/*.sqlite*
             data/mail.log
+
+      - name: Seite erreichbar?
+        if: steps.creds.outputs.ok == 'true'
+        run: |
+          sleep 5
+          code=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL")
+          echo "$APP_URL antwortet mit HTTP $code"
+          echo "API: $(curl -s "${APP_URL}api/index.php?action=status")"
+          test "$code" = "200"

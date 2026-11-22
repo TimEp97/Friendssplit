@@ -27,22 +27,37 @@ final class Db
         return (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
     }
 
-    /** Legt alle Tabellen an, falls sie noch nicht existieren. */
-    public static function migrate(PDO $pdo): void
+    /** Stand des Datenbankschemas. Erhöhen, wenn sich schema/*.sql ändert. */
+    public const SCHEMA_VERSION = 2;
+
+    /**
+     * Legt fehlende Tabellen an und rüstet Spalten nach. Prüft zuerst die gespeicherte
+     * Schema-Version, sodass bei aktuellem Stand nur eine einzige Abfrage anfällt.
+     */
+    public static function migrate(PDO $pdo, bool $force = false): void
     {
+        if (!$force) {
+            try {
+                $version = (int) $pdo->query("SELECT v FROM fs_meta WHERE k = 'schema'")->fetchColumn();
+                if ($version >= self::SCHEMA_VERSION) {
+                    return;
+                }
+            } catch (PDOException) {
+                // Tabelle fehlt noch → einrichten
+            }
+        }
         $file = __DIR__ . '/../schema/' . (self::driver($pdo) === 'sqlite' ? 'sqlite.sql' : 'mysql.sql');
         $sql = (string) file_get_contents($file);
         $sql = (string) preg_replace('/^\s*--.*$/m', '', $sql);
         foreach (array_filter(array_map('trim', explode(';', $sql))) as $statement) {
             $pdo->exec($statement);
         }
-        // Spalten, die nach Version 1 hinzugekommen sind, in bestehenden Installationen nachrüsten.
+        // Spalte aus dem PayPal-Update für Installationen der ersten Version nachrüsten.
         if (!self::hasColumn($pdo, 'fs_persons', 'paypal_me')) {
             $pdo->exec('ALTER TABLE fs_persons ADD COLUMN paypal_me ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(40)') . ' NULL');
         }
-        if (!self::hasColumn($pdo, 'fs_users', 'pending_email')) {
-            $pdo->exec('ALTER TABLE fs_users ADD COLUMN pending_email ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(190)') . ' NULL');
-        }
+        $pdo->prepare('DELETE FROM fs_meta WHERE k = ?')->execute(['schema']);
+        $pdo->prepare('INSERT INTO fs_meta (k, v) VALUES (?, ?)')->execute(['schema', (string) self::SCHEMA_VERSION]);
     }
 
     private static function hasColumn(PDO $pdo, string $table, string $column): bool

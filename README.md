@@ -2,7 +2,9 @@
 
 Mobile-first Web-App, mit der eine Freundesgruppe gemeinsame Ausgaben für einen Ausflug, Abend oder ein Event erfasst und fair abrechnet – gedacht zur Einbindung in eine bestehende Webseite bei **ALL-INKL.COM** (oder jedem anderen Webhosting mit PHP und MySQL).
 
-- **Konto mit E-Mail und Passwort:** Registrierung mit Bestätigungslink per E-Mail, „Passwort vergessen“. Im Profil: Name, PayPal.me-Link, E-Mail-Adresse und Passwort ändern, Konto löschen. Alle eigenen Events auf jedem Gerät
+- **Konten wie in der Reiseapp:** nur mit Einladung, Anmelden mit Name oder E-Mail, 6-stelliger Code per E-Mail auf neuen Geräten, „Passwort vergessen“. Im Profil: Name, PayPal.me-Link, E-Mail-Adresse und Passwort ändern, Konto löschen. Alle eigenen Events auf jedem Gerät
+- **Freunde:** Einladungslinks (einzeln oder für eine Gruppe), Suche nach Namen, Anfragen annehmen/ablehnen. Freunde lassen sich direkt ins Event holen – ohne Link
+- **Admin-Seite:** alle Konten sehen, sperren, löschen, Passwort-Link erzeugen
 - Events anlegen, Teilnehmende hinzufügen, per Link oder Code einladen. Wer den Link öffnet, meldet sich an und wählt seinen Namen (oder tritt neu bei)
 - Ausgaben mit Betrag, Beschreibung, Kategorie (🍹 🍕 🎟️ 🚕 🏨 🛍️), zahlender Person, Beteiligten, Datum und Notiz
 - Automatische, centgenaue Aufteilung, Salden je Person und ein Ausgleichsplan („Sam zahlt Alex 20,00 €“)
@@ -34,60 +36,42 @@ public/                  ← dieser Ordner kommt auf den Webspace
 tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end)
 ```
 
-## Installation bei ALL-INKL.COM
+## Online: friendsplit.stuttgartapps.de (ALL-INKL)
 
-1. **Datenbank anlegen:** KAS → *Datenbanken* → *Neue Datenbank*. Datenbankname, Benutzer und Passwort notieren (z. B. `d0123456`).
-2. **Dateien hochladen:** Den Inhalt von `public/` per FTP in einen Unterordner deiner Webseite laden, z. B. `/friendsplit/`.
-3. **Konfiguration:** `api/config.sample.php` nach `api/config.php` kopieren und eintragen:
-   ```php
-   'dsn'      => 'mysql:host=localhost;dbname=d0123456;charset=utf8mb4',
-   'user'     => 'd0123456',
-   'password' => '…',
-   // …
-   'app_url'  => 'https://deine-domain.de/friendsplit/',   // für die Links in den E-Mails
-   'mail'     => ['transport' => 'mail', 'from' => 'noreply@deine-domain.de', 'from_name' => 'FriendSplit'],
-   ```
-   **E-Mail bei ALL-INKL:** Der Versand läuft über PHPs `mail()` und braucht keine weitere Einrichtung. Die Absenderadresse (`from`) muss aber zu deiner Domain gehören. Lege sie im KAS unter *E-Mail* als Postfach oder Weiterleitung an, sonst landen die Mails eher im Spam. `app_url` ist Pflicht: Ohne sie verschickt die App keine Bestätigungs- oder Passwort-Links.
-4. **Tabellen anlegen** – eine der beiden Varianten:
-   - phpMyAdmin öffnen (KAS → Datenbanken → phpMyAdmin), Datenbank wählen, *Importieren* → `api/schema/mysql.sql`.
-   - Oder in `config.php` einen langen Zufallswert als `setup_key` eintragen und einmal  
-     `https://deine-domain.de/friendsplit/api/index.php?action=setup&key=DEIN_SETUP_KEY` aufrufen. Danach `setup_key` wieder leeren.
-5. **HTTPS:** Im KAS ein (kostenloses Let's-Encrypt-)Zertifikat für die Domain aktivieren. Kopieren und Teilen von Links funktionieren im Browser nur über HTTPS zuverlässig.
-6. **Einbinden:** Auf der bestehenden Webseite einen Link auf `/friendsplit/` setzen. Alle Pfade sind relativ, der Ordnername ist frei wählbar.
+Eingerichtet wie die Reiseapp: Bei jedem Push auf den Haupt-Branch testet GitHub die App, schreibt `api/config.php` aus den Secrets und lädt `public/` per FTPS hoch (`.github/workflows/deploy-all-inkl.yml`). Die Datenbanktabellen (Präfix `fs_`) legt die App selbst an.
 
-### Automatisch hochladen mit GitHub Actions
+**Einmalig im KAS:**
 
-Statt per FTP-Programm kann GitHub die Dateien hochladen (`.github/workflows/deploy-all-inkl.yml`):
+1. **Subdomain** `friendsplit.stuttgartapps.de` anlegen und SSL (Let's Encrypt) aktivieren.
+2. **FTP-Benutzer** anlegen, beschränkt auf den Ordner der Subdomain (wie `f0193aef` bei der Reiseapp).
+3. **Datenbank** anlegen (KAS → Datenbanken). Name und Benutzer sind gleich, z. B. `d0xxxxxx`. Am einfachsten dasselbe Passwort wie beim FTP-Benutzer vergeben.
+4. **Absenderadresse** `noreply@stuttgartapps.de` als Postfach oder Weiterleitung anlegen, damit die Codes nicht im Spam landen.
 
-1. **Secrets anlegen:** Im Repository unter *Settings → Secrets and variables → Actions* vier Secrets eintragen:
-   - `FTP_SERVER` (z. B. `w0123456.kasserver.com`)
-   - `FTP_USERNAME`
-   - `FTP_PASSWORD`
-   - `FTP_DIR` (Zielordner mit `/` am Ende, z. B. `/friendsplit/`)
-   Am besten legst du im KAS einen eigenen FTP-Benutzer an, der nur auf diesen Ordner zugreifen darf.
-2. **Starten:** *Actions → Deploy zu ALL-INKL → Run workflow*. Erst laufen die Tests, danach lädt GitHub den Inhalt von `public/` per FTPS hoch. Später werden nur geänderte Dateien übertragen.
-3. `api/config.php` auf dem Server wird dabei nie überschrieben. Neue Einstellungen trägst du dort weiterhin selbst ein.
+**Einmalig in GitHub** unter *Settings → Secrets and variables → Actions*:
 
-Der Workflow erscheint unter *Actions* erst, wenn er auf dem Standard-Branch (`main`) liegt.
+| Secret | Wert |
+| --- | --- |
+| `KEY_FRIENDSPLIT` | Passwort des FTP-Benutzers |
+| `FTP_USERNAME` | FTP-Benutzer aus Schritt 2, z. B. `f0xxxxxx` |
+| `DB_NAME` | Datenbank aus Schritt 3, z. B. `d0xxxxxx` |
+| `DB_PASSWORD` | optional, nur wenn das Datenbank-Passwort anders ist als `KEY_FRIENDSPLIT` |
+| `SETUP_CODE` | optional, Code für das erste Konto (mind. 12 Zeichen). Ohne ihn gilt das Datenbank-Passwort |
 
-### Update einer bestehenden Installation
+Server (`w0222c40.kasserver.com`) und Zielordner (`./`) stehen im Workflow und lassen sich per Secret `FTP_SERVER` bzw. `FTP_DIR` überschreiben. Fehlen Secrets, laufen nur die Tests und der Upload wird übersprungen.
 
-Neue Dateien per FTP hochladen (deine `api/config.php` bleibt unverändert). Danach die Datenbank einmal nachrüsten:
+**Hochladen:** passiert automatisch bei jedem Push auf den Haupt-Branch. Von Hand: *Actions → Deploy zu ALL-INKL → Run workflow*.
 
-- `setup_key` in `config.php` setzen und `…/api/index.php?action=setup&key=DEIN_SETUP_KEY` aufrufen. Das legt neue Tabellen an und ergänzt fehlende Spalten automatisch.
-- Oder in phpMyAdmin erst `api/schema/mysql.sql` und dann `api/schema/upgrade.sql` importieren.
+**Erstes Konto:** `https://friendsplit.stuttgartapps.de/` öffnen. Solange es kein Konto gibt, fragt die App nach dem Einrichtungscode (`SETUP_CODE` bzw. Datenbank-Passwort). Dieses Konto ist Admin. Danach lädst du deine Freunde über *Freunde → Freunde einladen* ein.
 
-Außerdem `app_url` und `mail` in `config.php` ergänzen (siehe `config.sample.php`). Nach dem Update muss sich jede Person einmal registrieren. Bestehende Events bleiben erhalten: Wer den Event-Link öffnet, wählt seinen bisherigen Namen und übernimmt ihn damit samt aller Ausgaben ins eigene Konto.
-
-Alle Tabellen haben das Präfix `fs_`, damit sie neben bestehenden Tabellen in derselben Datenbank liegen können.
+**Von Hand statt mit GitHub:** `api/config.sample.php` nach `api/config.php` kopieren, ausfüllen und den Inhalt von `public/` per FTP hochladen.
 
 ## Lokale Entwicklung und Tests
 
 ```bash
 cp public/api/config.sample.php public/api/config.php
-# in config.php die SQLite-Zeile aktivieren, 'auto_migrate' => true setzen,
-# 'app_url' => 'http://localhost:8000/' und bei 'mail' 'transport' => 'log' –
-# dann stehen Bestätigungs-Mails in public/data/mail.log statt im Postfach
+# in config.php die SQLite-Zeile aktivieren, 'auto_migrate' => true, 'setup_code' => 'mein-einrichtungscode',
+# 'app_url' => 'http://localhost:8000/' und bei 'mail' 'transport' => 'log' setzen –
+# dann stehen Codes und Links in public/data/mail.log statt im Postfach
 php -S localhost:8000 -t public
 # → http://localhost:8000
 
@@ -103,16 +87,46 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 - **Ausgleichsplan:** Die Person mit der größten Schuld zahlt an die Person mit dem größten Guthaben, bis alles ausgeglichen ist – höchstens *n − 1* Zahlungen. Vorschläge verändern keine Ausgaben.
 - Beträge werden ausschließlich als ganze Cent (`INT`) gespeichert und berechnet. Die Anteile werden pro Ausgabe gespeichert (`fs_expense_shares`), damit später auch ungleiche Aufteilungen möglich sind.
 
-## Konten und Anmeldung
+## Konten, Freunde und Admin
 
-- **Registrieren:** Name, E-Mail-Adresse und Passwort (mindestens 8 Zeichen). Danach kommt eine E-Mail mit einem Bestätigungslink (48 Stunden gültig). Erst mit bestätigter Adresse kann man sich anmelden. Der Link meldet direkt an und führt zurück zum Event, falls man über einen Event-Link gekommen ist.
-- **Anmelden:** E-Mail und Passwort. Die Sitzung hält 30 Tage.
+Aufgebaut wie in der Reiseapp:
+
+- **Nur mit Einladung:** Das erste Konto entsteht mit dem Einrichtungscode und ist Admin. Alle weiteren registrieren sich mit einem Einladungslink (`#/registrieren/ABCD-EFGH-JKLM`). Jede angemeldete Person kann unter *Freunde* Links erstellen:
+  - für eine Person
+  - als Gruppenlink für bis zu 30 Personen
+
+  Die Links gelten 14 Tage, höchstens 10 offene Links pro Person. Wer sich über einen Link registriert, bekommt automatisch eine Freundschaftsanfrage der einladenden Person.
+- **Registrieren:** Name (3–24 Zeichen, eindeutig, darüber finden einen Freunde), E-Mail-Adresse und Passwort (mindestens 10 Zeichen). Danach kommt ein 6-stelliger Code per E-Mail. Mit dem Code ist die Adresse bestätigt und man ist angemeldet.
+- **Anmelden:** mit Name oder E-Mail-Adresse und Passwort.
+  - Auf einem neuen Gerät kommt zusätzlich ein Code per E-Mail. Er gilt 15 Minuten, nach 60 Sekunden kann man ihn neu anfordern.
+  - Bekannte Geräte merkt sich die App 90 Tage. Die Sitzung hält 90 Tage.
 - **Passwort vergessen:** Link per E-Mail (60 Minuten gültig, nur einmal nutzbar). Ein neues Passwort meldet alle anderen Geräte ab.
-- **Profil:** Name (gilt für neue Events), PayPal.me-Link, E-Mail-Adresse ändern (Bestätigungslink an die neue Adresse, Hinweis an die alte, bis zur Bestätigung bleibt die alte aktiv), Passwort ändern (meldet andere Geräte ab). Für Änderungen an E-Mail, Passwort und zum Löschen ist das aktuelle Passwort nötig.
-- **Konto löschen:** Entfernt Konto, E-Mail-Adresse, Passwort, PayPal.me-Link und alle Sitzungen endgültig. In Events bleibt die Person mit ihrem Namen und ihren Ausgaben als Platzhalter ohne Konto stehen, damit die Abrechnung der anderen stimmt. Wer sich neu registriert, kann den Namen wieder übernehmen.
-- **Pflicht für alles:** Ohne Anmeldung zeigt die App nur Login und Registrierung. Events anlegen, beitreten und Ausgaben eintragen geht nur mit bestätigtem Konto.
-- **Event beitreten:** Wer den Link öffnet und angemeldet ist, wählt einen noch freien Namen aus der Liste (z. B. „Sam“, vom Organisator angelegt) oder tritt mit neuem Namen bei. Personen ohne Konto bleiben als Platzhalter möglich, damit man schon Ausgaben für sie eintragen kann.
-- **Sicherheit:** Passwörter nur als `password_hash()`. Sitzungs- und E-Mail-Tokens nur als SHA-256-Hash in der Datenbank. Das Sitzungs-Cookie ist `HttpOnly`, `SameSite=Lax` und über HTTPS `Secure`. Jede POST-Anfrage braucht den Header `X-Requested-With: FriendSplit` (Schutz vor CSRF). Anmeldeversuche und E-Mails sind begrenzt (z. B. 10 Fehlversuche pro Adresse in 15 Minuten). Die App verrät nicht, ob ein Konto zu einer E-Mail-Adresse existiert.
+- **Freunde:** Suche nach Namen (ab 2 Buchstaben), Anfrage schicken, annehmen, ablehnen, zurückziehen, Freundschaft beenden. Fragen sich zwei gegenseitig an, sind sie sofort befreundet. Freunde sehen nur Namen, nie die E-Mail-Adresse.
+- **Freunde ins Event holen:**
+  - beim Erstellen des Events, oder
+  - später unter *Teilnehmende → Freunde dazuholen*.
+
+  Das Event erscheint sofort in ihrer Liste. Gibt es schon einen Platzhalter mit demselben Namen, wird er mit dem Konto verknüpft, samt der Ausgaben.
+- **Profil:**
+  - Name (für Freunde und neue Events) und PayPal.me-Link
+  - E-Mail-Adresse ändern: Bestätigungslink an die neue Adresse, Hinweis an die alte. Bis zur Bestätigung bleibt die alte aktiv.
+  - Passwort ändern: meldet andere Geräte ab
+  - Konto löschen
+
+  Für Änderungen an E-Mail und Passwort und zum Löschen ist das aktuelle Passwort nötig.
+- **Konto löschen:** Entfernt endgültig das Konto mit E-Mail-Adresse, Passwort, PayPal.me-Link, Freundschaften, Einladungen und allen Sitzungen. In Events bleibt die Person mit Namen und Ausgaben als Platzhalter ohne Konto stehen, damit die Abrechnung der anderen stimmt.
+- **Admin-Seite** (`#/admin`, Link „Nutzer verwalten“ im Profil):
+  - Liste aller Konten mit E-Mail, wer eingeladen hat, letzter Anmeldung, Zahl der Events und Freunde
+  - Passwort-Link erzeugen: 24 Stunden gültig, zum direkten Weitergeben, wenn Mails nicht ankommen
+  - Konten sperren, entsperren und löschen
+- **Event beitreten per Link:** Wer den Link öffnet und angemeldet ist, wählt einen noch freien Namen aus der Liste oder tritt mit neuem Namen bei. Personen ohne Konto bleiben als Platzhalter möglich, damit man schon Ausgaben für sie eintragen kann.
+- **Sicherheit:**
+  - Passwörter liegen nur als `password_hash()` vor.
+  - Sitzungs-, Geräte-, Code- und Link-Tokens liegen nur als SHA-256-Hash in der Datenbank.
+  - Cookies sind `HttpOnly`, `SameSite=Lax` und über HTTPS `Secure`.
+  - Jede POST-Anfrage braucht den Header `X-Requested-With: FriendSplit` (Schutz vor CSRF).
+  - Anmeldeversuche, Codes und E-Mails sind begrenzt, z. B. 10 Fehlversuche pro Konto in 15 Minuten und 5 Versuche pro Code.
+  - Die App verrät nicht, ob es ein Konto zu einer Adresse gibt.
 
 ## PayPal-Zahlungen
 
@@ -143,13 +157,22 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 
 | Aktion | Methode | Zweck |
 |---|---|---|
-| `register` / `verify_email` / `resend_verification` | POST | Konto anlegen, E-Mail bestätigen (meldet an), Link erneut senden |
-| `login` / `logout` | POST | An- und Abmelden |
-| `request_password_reset` / `reset_password` | POST | Link anfordern, neues Passwort setzen (meldet an) |
-| `me` / `update_profile` | GET / POST | Eigenes Profil mit Events lesen, Name und PayPal.me-Link ändern |
+| `status` / `invite_info` | GET | ohne Anmeldung: Einrichtung nötig? / Wer lädt mit diesem Code ein? |
+| `setup_account` | POST | Erstes Konto (Admin) mit Einrichtungscode |
+| `register` | POST | Konto mit Einladung anlegen → 202 `{ pending, purpose, email }` |
+| `login` | POST | Name oder E-Mail + Passwort → `{ user }` oder auf neuen Geräten 202 `{ pending, … }` |
+| `verify_code` / `resend_code` | POST | Code aus der E-Mail einlösen (meldet an) bzw. neu anfordern |
+| `logout` | POST | Abmelden |
+| `request_password_reset` / `reset_password` | POST | Link anfordern (`login`), neues Passwort setzen (meldet an) |
+| `me` / `update_profile` | GET / POST | Eigenes Profil mit Events und offenen Anfragen; Name und PayPal.me-Link ändern |
 | `change_email` / `confirm_email_change` | POST | Neue E-Mail-Adresse anfordern (mit Passwort) und per Link bestätigen |
 | `change_password` / `delete_account` | POST | Passwort ändern bzw. Konto löschen (jeweils mit aktuellem Passwort) |
-| `create_event` | POST | Event mit Teilnehmenden anlegen → `code`, `person_id` |
+| `friends` / `search` | GET | Freunde, eingehende und ausgehende Anfragen / Suche nach Namen (`q`) |
+| `friend_request` / `friend_accept` / `friend_remove` | POST | Anfragen, annehmen, ablehnen/zurückziehen/beenden (`id`) |
+| `invites` / `invite_create` / `invite_delete` | GET / POST | Eigene Einladungen, neue (`note`, `group`), löschen (`code`) |
+| `admin_users` / `admin_block` / `admin_delete` / `admin_reset_link` | GET / POST | nur Admin: Konten verwalten |
+| `create_event` | POST | Event mit Teilnehmenden (`participants`) und Freunden (`friends`) anlegen → `code`, `person_id` |
+| `add_friends` | POST | Freunde (`friends`: Konto-IDs) ins Event holen |
 | `join_event` / `claim_person` / `release_person` | POST | Beitreten (neuer Name / freien Namen übernehmen), Verknüpfung lösen |
 | `event` | GET | Gesamtzustand: Event, Teilnehmende, Ausgaben mit Anteilen, Zahlungen, Salden, Plan, Verlauf |
 | `update_event` | POST | Name, Datum, Ort, Notiz ändern |

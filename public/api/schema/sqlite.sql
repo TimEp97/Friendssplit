@@ -81,15 +81,19 @@ CREATE TABLE IF NOT EXISTS fs_activity (
 CREATE INDEX IF NOT EXISTS idx_activity_event ON fs_activity (event_id, created_at);
 
 CREATE TABLE IF NOT EXISTS fs_users (
-  id                TEXT NOT NULL PRIMARY KEY,
-  email             TEXT NOT NULL UNIQUE,
-  pending_email     TEXT NULL,
-  password_hash     TEXT NOT NULL,
-  display_name      TEXT NOT NULL,
-  paypal_me         TEXT NULL,
-  email_verified_at TEXT NULL,
-  created_at        TEXT NOT NULL,
-  updated_at        TEXT NOT NULL
+  id                TEXT    NOT NULL PRIMARY KEY,
+  display_name      TEXT    NOT NULL,
+  username_key      TEXT    NOT NULL UNIQUE,
+  email             TEXT    NOT NULL UNIQUE,
+  pending_email     TEXT    NULL,
+  password_hash     TEXT    NOT NULL,
+  role              TEXT    NOT NULL DEFAULT 'user',
+  paypal_me         TEXT    NULL,
+  email_verified_at TEXT    NULL,
+  blocked           INTEGER NOT NULL DEFAULT 0,
+  last_login_at     TEXT    NULL,
+  created_at        TEXT    NOT NULL,
+  updated_at        TEXT    NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS fs_sessions (
@@ -100,6 +104,24 @@ CREATE TABLE IF NOT EXISTS fs_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON fs_sessions (user_id);
 
+CREATE TABLE IF NOT EXISTS fs_devices (
+  token_hash   TEXT NOT NULL PRIMARY KEY,
+  user_id      TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  created_at   TEXT NOT NULL,
+  last_used_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fs_codes (
+  token_hash TEXT    NOT NULL PRIMARY KEY,
+  user_id    TEXT    NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  purpose    TEXT    NOT NULL,
+  code_hash  TEXT    NOT NULL,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  sends      INTEGER NOT NULL DEFAULT 1,
+  sent_at    TEXT    NOT NULL,
+  expires_at TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fs_user_tokens (
   token_hash TEXT NOT NULL PRIMARY KEY,
   user_id    TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
@@ -109,10 +131,41 @@ CREATE TABLE IF NOT EXISTS fs_user_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_user_tokens_user ON fs_user_tokens (user_id, purpose);
 
+CREATE TABLE IF NOT EXISTS fs_invites (
+  code       TEXT    NOT NULL PRIMARY KEY,
+  created_by TEXT    NOT NULL,
+  note       TEXT    NOT NULL DEFAULT '',
+  created_at TEXT    NOT NULL,
+  expires_at TEXT    NOT NULL,
+  max_uses   INTEGER NOT NULL DEFAULT 1,
+  uses       INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS fs_invite_uses (
+  code    TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  used_at TEXT NOT NULL,
+  PRIMARY KEY (code, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS fs_friends (
+  requester_id TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  addressee_id TEXT NOT NULL REFERENCES fs_users (id) ON DELETE CASCADE,
+  status       TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  accepted_at  TEXT NULL,
+  PRIMARY KEY (requester_id, addressee_id)
+);
+
 CREATE TABLE IF NOT EXISTS fs_rate_limits (
   bucket       TEXT    NOT NULL PRIMARY KEY,
   hits         INTEGER NOT NULL,
   window_start TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS fs_meta (
+  k TEXT NOT NULL PRIMARY KEY,
+  v TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_persons_user ON fs_persons (auth_user_id);
