@@ -64,6 +64,12 @@ jobs:
           if [ -z "$missing" ]; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
             echo "Zugangsdaten gefunden: $FTP_USERNAME@$FTP_SERVER, Zielordner $FTP_DIR, Datenbank $DB_NAME"
+            # Beim Kopieren (z. B. am Handy) rutschen leicht Leerzeichen oder Zeilenumbrüche mit hinein – abschneiden.
+            clean="$(printf '%s' "$FTP_PASSWORD" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ "$clean" = "$FTP_PASSWORD" ] || echo "::warning::Das FTP-Passwort im Secret hatte Leerzeichen/Zeilenumbrüche am Rand – sie wurden entfernt."
+            echo "::add-mask::$clean"
+            echo "FTP-Passwort: ${#clean} Zeichen (zum Vergleich mit dem Passwort im KAS)"
+            { echo "FTP_PASS_CLEAN<<__EOF__"; printf '%s\n' "$clean"; echo "__EOF__"; } >> "$GITHUB_ENV"
           else
             echo "ok=false" >> "$GITHUB_OUTPUT"
             echo "::warning::Es fehlen die Repository-Secrets:$missing – Tests sind grün, Upload übersprungen."
@@ -72,7 +78,7 @@ jobs:
       - name: Server-Konfiguration schreiben
         if: steps.creds.outputs.ok == 'true'
         env:
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT || secrets.FTP_PASSWORD }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD || env.FTP_PASS_CLEAN }}
           SETUP_CODE: ${{ secrets.SETUP_CODE }}
         run: |
           # Werte über var_export als sichere PHP-Zeichenketten einsetzen
@@ -100,7 +106,7 @@ jobs:
         with:
           server: ${{ env.FTP_SERVER }}
           username: ${{ env.FTP_USERNAME }}
-          password: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT }}
+          password: ${{ env.FTP_PASS_CLEAN }}
           protocol: ftps
           local-dir: ./public/
           server-dir: ${{ env.FTP_DIR }}
