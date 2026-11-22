@@ -36,13 +36,13 @@ public/                  ← dieser Ordner kommt auf den Webspace
 tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end)
 ```
 
-## Online: friendsplit.stuttgartapps.de (ALL-INKL)
+## Online: friendssplitt.stuttgartapps.de (ALL-INKL)
 
 Eingerichtet wie die Reiseapp: Bei jedem Push auf den Haupt-Branch testet GitHub die App, schreibt `api/config.php` aus den Secrets und lädt `public/` per FTPS hoch (`.github/workflows/deploy-all-inkl.yml`). Die Datenbanktabellen (Präfix `fs_`) legt die App selbst an.
 
 **Einmalig im KAS:**
 
-1. **Subdomain** `friendsplit.stuttgartapps.de` anlegen und SSL (Let's Encrypt) aktivieren.
+1. **Subdomain** `friendssplitt.stuttgartapps.de` anlegen und SSL (Let's Encrypt) aktivieren.
 2. **FTP-Benutzer** anlegen, beschränkt auf den Ordner der Subdomain (wie `f0193aef` bei der Reiseapp).
 3. **Datenbank** anlegen (KAS → Datenbanken). Name und Benutzer sind gleich, z. B. `d0xxxxxx`. Am einfachsten dasselbe Passwort wie beim FTP-Benutzer vergeben.
 4. **Absenderadresse** `noreply@stuttgartapps.de` als Postfach oder Weiterleitung anlegen, damit die Codes nicht im Spam landen.
@@ -61,7 +61,7 @@ Server (`w0222c40.kasserver.com`) und Zielordner (`./`) stehen im Workflow und l
 
 **Hochladen:** passiert automatisch bei jedem Push auf den Haupt-Branch. Von Hand: *Actions → Deploy zu ALL-INKL → Run workflow*.
 
-**Erstes Konto:** `https://friendsplit.stuttgartapps.de/` öffnen. Solange es kein Konto gibt, fragt die App nach dem Einrichtungscode (`SETUP_CODE` bzw. Datenbank-Passwort). Dieses Konto ist Admin. Danach lädst du deine Freunde über *Freunde → Freunde einladen* ein.
+**Erstes Konto:** `https://friendssplitt.stuttgartapps.de/` öffnen. Solange es kein Konto gibt, fragt die App nach dem Einrichtungscode (`SETUP_CODE` bzw. Datenbank-Passwort). Dieses Konto ist Admin. Danach lädst du deine Freunde über *Freunde → Freunde einladen* ein.
 
 **Von Hand statt mit GitHub:** `api/config.sample.php` nach `api/config.php` kopieren, ausfüllen und den Inhalt von `public/` per FTP hochladen.
 
