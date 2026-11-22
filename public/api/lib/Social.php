@@ -5,7 +5,7 @@ declare(strict_types=1);
  * Einladungen, Freunde und Admin-Übersicht – im Stil der Reiseapp.
  *
  * - Einladungen: Jede angemeldete Person kann Links erzeugen (für eine Person oder als Gruppenlink
- *   für bis zu 30 Personen, 14 Tage gültig). Wer sich damit registriert, bekommt automatisch eine
+ *   für bis zu 30 Personen, 14 Tage gültig) und hat einen festen Dauerlink ohne Ablauf und ohne Limit. Wer sich damit registriert, bekommt automatisch eine
  *   Freundschaftsanfrage der einladenden Person.
  * - Freunde: Suche nach Namen, Anfrage, Annehmen/Ablehnen/Entfernen. Freunde sehen nur Namen –
  *   nie die E-Mail-Adresse.
@@ -17,6 +17,9 @@ final class Social
     private const GROUP_USES = 30;
     private const OPEN_INVITES = 10;
     private const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    /** Dauerlink: läuft nie ab und hat praktisch kein Limit (ohne eigene Spalte, damit kein Schema-Update nötig ist). */
+    private const PERMANENT_EXPIRES = '9999-12-31 00:00:00';
+    private const PERMANENT_USES = 1_000_000;
 
     public function __construct(private PDO $db, private Auth $auth)
     {
@@ -42,13 +45,14 @@ final class Social
     {
         $this->auth->limit('invite_info:ip:' . ($_SERVER['REMOTE_ADDR'] ?? ''), 60, 900);
         $stmt = $this->db->prepare(
-            'SELECT i.max_uses, i.uses, i.expires_at, u.display_name FROM fs_invites i
+            'SELECT i.max_uses, i.uses, i.expires_at, u.display_name, u.blocked FROM fs_invites i
              LEFT JOIN fs_users u ON u.id = i.created_by WHERE i.code = ?'
         );
         $stmt->execute([self::normalizeInviteCode($raw)]);
         $row = $stmt->fetch();
-        $valid = $row !== false && (int) $row['uses'] < (int) $row['max_uses'] && $row['expires_at'] > Db::now();
-        return ['valid' => $valid, 'from' => $valid ? $row['display_name'] : null, 'group' => $valid && (int) $row['max_uses'] > 1];
+        $valid = $row !== false && (int) $row['uses'] < (int) $row['max_uses'] && $row['expires_at'] > Db::now() && (int) ($row['blocked'] ?? 0) === 0;
+        $permanent = $valid && $row['expires_at'] >= self::PERMANENT_EXPIRES;
+        return ['valid' => $valid, 'from' => $valid ? $row['display_name'] : null, 'group' => $valid && !$permanent && (int) $row['max_uses'] > 1];
     }
 
     /**
@@ -62,14 +66,16 @@ final class Social
         $names = $this->db->prepare('SELECT u.display_name FROM fs_invite_uses x JOIN fs_users u ON u.id = x.user_id WHERE x.code = ? ORDER BY x.used_at, u.username_key');
         return array_map(function ($r) use ($names) {
             $names->execute([$r['code']]);
+            $permanent = $r['expires_at'] >= self::PERMANENT_EXPIRES;
             return [
                 'code' => self::formatInviteCode($r['code']),
+                'permanent' => $permanent,
                 'note' => $r['note'],
                 'group' => (int) $r['max_uses'] > 1,
                 'uses' => (int) $r['uses'],
                 'max_uses' => (int) $r['max_uses'],
                 'members' => $names->fetchAll(PDO::FETCH_COLUMN),
-                'expires_at' => self::iso($r['expires_at']),
+                'expires_at' => $permanent ? null : self::iso($r['expires_at']),
                 'open' => (int) $r['uses'] < (int) $r['max_uses'] && $r['expires_at'] > Db::now(),
                 'link' => $this->auth->link('registrieren/' . self::formatInviteCode($r['code'])),
             ];
@@ -85,11 +91,40 @@ final class Social
     {
         $note = is_string($in['note'] ?? null) ? mb_substr(trim((string) preg_replace('/[\x00-\x1F\x7F]/u', '', $in['note'])), 0, 100) : '';
         $group = ($in['group'] ?? false) === true;
-        $open = $this->db->prepare('SELECT COUNT(*) FROM fs_invites WHERE created_by = ? AND uses < max_uses AND expires_at > ?');
-        $open->execute([$user['id'], Db::now()]);
+        $open = $this->db->prepare('SELECT COUNT(*) FROM fs_invites WHERE created_by = ? AND uses < max_uses AND expires_at > ? AND expires_at < ?');
+        $open->execute([$user['id'], Db::now(), self::PERMANENT_EXPIRES]);
         if ((int) $open->fetchColumn() >= self::OPEN_INVITES) {
             throw new ApiError(409, 'too_many_invites', 'Du hast schon ' . self::OPEN_INVITES . ' offene Einladungen. Lösche eine alte, bevor du eine neue erstellst.');
         }
+        return $this->insertInvite($user, $note, gmdate('Y-m-d H:i:s', time() + self::INVITE_DAYS * 86400), $group ? self::GROUP_USES : 1);
+    }
+
+    /**
+     * Fester Einladungslink der Person: läuft nicht ab, beliebig oft nutzbar. Wird beim ersten Abruf angelegt.
+     * Mit $renew = true wird der alte Link ungültig und ein neuer erzeugt (falls er in falsche Hände geraten ist).
+     * @param array<string,mixed> $user
+     * @return array<string,mixed>
+     */
+    public function permanentInvite(array $user, bool $renew = false): array
+    {
+        $find = $this->db->prepare('SELECT code FROM fs_invites WHERE created_by = ? AND expires_at >= ? ORDER BY created_at DESC');
+        $find->execute([$user['id'], self::PERMANENT_EXPIRES]);
+        $code = $find->fetchColumn();
+        if ($code !== false && !$renew) {
+            return $this->inviteByCode($user, (string) $code);
+        }
+        if ($code !== false) {
+            $this->db->prepare('DELETE FROM fs_invites WHERE created_by = ? AND expires_at >= ?')->execute([$user['id'], self::PERMANENT_EXPIRES]);
+        }
+        return $this->insertInvite($user, '', self::PERMANENT_EXPIRES, self::PERMANENT_USES);
+    }
+
+    /**
+     * @param array<string,mixed> $user
+     * @return array<string,mixed>
+     */
+    private function insertInvite(array $user, string $note, string $expiresAt, int $maxUses): array
+    {
         $stmt = $this->db->prepare('INSERT INTO fs_invites (code, created_by, note, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?)');
         for ($attempt = 0; ; $attempt++) {
             $code = '';
@@ -97,7 +132,7 @@ final class Social
                 $code .= self::CODE_ALPHABET[random_int(0, strlen(self::CODE_ALPHABET) - 1)];
             }
             try {
-                $stmt->execute([$code, $user['id'], $note, Db::now(), gmdate('Y-m-d H:i:s', time() + self::INVITE_DAYS * 86400), $group ? self::GROUP_USES : 1]);
+                $stmt->execute([$code, $user['id'], $note, Db::now(), $expiresAt, $maxUses]);
                 break;
             } catch (PDOException $e) {
                 if ($attempt >= 4) {
@@ -105,6 +140,15 @@ final class Social
                 }
             }
         }
+        return $this->inviteByCode($user, $code);
+    }
+
+    /**
+     * @param array<string,mixed> $user
+     * @return array<string,mixed>
+     */
+    private function inviteByCode(array $user, string $code): array
+    {
         foreach ($this->invites($user) as $invite) {
             if ($invite['code'] === self::formatInviteCode($code)) {
                 return $invite;

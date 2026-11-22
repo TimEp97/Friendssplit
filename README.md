@@ -89,11 +89,11 @@ php tests/ApiTest.php     # startet einen Testserver mit temporärer SQLite-DB
 
 Aufgebaut wie in der Reiseapp:
 
-- **Nur mit Einladung:** Das erste Konto entsteht mit dem Einrichtungscode und ist Admin. Alle weiteren registrieren sich mit einem Einladungslink (`#/registrieren/ABCD-EFGH-JKLM`). Jede angemeldete Person kann unter *Freunde* Links erstellen:
-  - für eine Person
-  - als Gruppenlink für bis zu 30 Personen
+- **Nur mit Einladung:** Das erste Konto entsteht mit dem Einrichtungscode und ist Admin. Alle weiteren registrieren sich mit einem Einladungslink (`#/registrieren/ABCD-EFGH-JKLM`). Unter *Freunde → Freunde einladen* hat jede angemeldete Person:
+  - **einen festen Einladungslink:** läuft nicht ab und gilt für beliebig viele Personen, ideal für eine WhatsApp-Gruppe. Er lässt sich jederzeit durch einen neuen ersetzen, dann gilt der alte nicht mehr.
+  - **zusätzlich Einmal-Links:** für eine Person oder als Gruppenlink für bis zu 30 Personen, 14 Tage gültig, höchstens 10 offene pro Person.
 
-  Die Links gelten 14 Tage, höchstens 10 offene Links pro Person. Wer sich über einen Link registriert, bekommt automatisch eine Freundschaftsanfrage der einladenden Person.
+  Die App zeigt, wer sich über welchen Link registriert hat. Wer sich über einen Link registriert, bekommt automatisch eine Freundschaftsanfrage der einladenden Person.
 - **Registrieren:** Name (3–24 Zeichen, eindeutig, darüber finden einen Freunde), E-Mail-Adresse und Passwort (mindestens 10 Zeichen). Danach kommt ein 6-stelliger Code per E-Mail. Mit dem Code ist die Adresse bestätigt und man ist angemeldet.
 - **Anmelden:** mit Name oder E-Mail-Adresse und Passwort.
   - Auf einem neuen Gerät kommt zusätzlich ein Code per E-Mail. Er gilt 15 Minuten, nach 60 Sekunden kann man ihn neu anfordern.
@@ -168,6 +168,7 @@ Aufgebaut wie in der Reiseapp:
 | `friends` / `search` | GET | Freunde, eingehende und ausgehende Anfragen / Suche nach Namen (`q`) |
 | `friend_request` / `friend_accept` / `friend_remove` | POST | Anfragen, annehmen, ablehnen/zurückziehen/beenden (`id`) |
 | `invites` / `invite_create` / `invite_delete` | GET / POST | Eigene Einladungen, neue (`note`, `group`), löschen (`code`) |
+| `invite_permanent` | POST | Eigener Dauer-Einladungslink (wird beim ersten Aufruf angelegt; `renew: true` ersetzt ihn) |
 | `admin_users` / `admin_block` / `admin_delete` / `admin_reset_link` | GET / POST | nur Admin: Konten verwalten |
 | `create_event` | POST | Event mit Teilnehmenden (`participants`) und Freunden (`friends`) anlegen → `code`, `person_id` |
 | `add_friends` | POST | Freunde (`friends`: Konto-IDs) ins Event holen |

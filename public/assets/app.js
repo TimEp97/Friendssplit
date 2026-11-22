@@ -208,6 +208,7 @@ const S = {
   verifying: null, // Zustand beim Bestätigen einer neuen E-Mail-Adresse
   friends: null, // { friends, incoming, outgoing } vom Server
   invites: null,
+  permanentInvite: null, // fester Einladungslink (läuft nicht ab)
   search: { q: '', results: [] },
   adminUsers: null,
   createFriends: new Set(), // im Formular „Neues Event“ ausgewählte Freund:innen
@@ -313,6 +314,7 @@ async function loadFor(route) {
   if (['friends', 'create', 'personen'].includes(route.name)) jobs.push(api('friends').then(applyFriends));
   if (route.name === 'home') jobs.push(api('me').then((d) => { S.user = d.user; }));
   if (route.name === 'friends' && !S.invites) jobs.push(api('invites').then((d) => { S.invites = d.invites; }));
+  if (route.name === 'friends') jobs.push(api('invite_permanent', { body: {} }).then((d) => { S.permanentInvite = d.invite; }));
   if (route.name === 'admin') jobs.push(api('admin_users').then((d) => { S.adminUsers = d.users; }));
   if (route.name === 'register' && route.invite && S.inviteInfo?.code !== route.invite) {
     jobs.push(api('invite_info', { params: { code: route.invite } }).then((d) => { S.inviteInfo = { code: route.invite, ...d }; }));
@@ -893,23 +895,33 @@ function viewFriends() {
       ${f.outgoing.length ? html`<p class="muted small">Angefragt: ${f.outgoing.map((p, i) => html`${i ? ', ' : ''}${p.name} <button class="linkish" data-action="friend-remove" data-id="${p.id}" data-kind="cancel">zurückziehen</button>`)}</p>` : ''}
     </section>
 
-    <section class="card section" aria-labelledby="search-heading">
-      <h2 id="search-heading">Freunde finden</h2>
-      <div class="field"><label for="f-search">Name suchen</label>
-        <input id="f-search" type="search" value="${S.search.q}" autocomplete="off" placeholder="mind. 2 Buchstaben" aria-describedby="search-results"></div>
-      <ul class="list" id="search-results" aria-live="polite">${searchResults(statusLabel)}</ul>
-    </section>
-
-    <section class="card section" aria-labelledby="invite-heading">
+    <section class="card section invite-card" aria-labelledby="invite-heading">
       <h2 id="invite-heading">Freunde einladen</h2>
-      <p class="muted small">FriendSplit ist nur mit Einladung. Wer sich mit deinem Link registriert, bekommt automatisch eine Freundschaftsanfrage von dir. Links gelten 14 Tage.</p>
-      <form id="invite-form" class="inline-form" novalidate>
-        <div class="field field--grow"><label for="f-invite-note">Für wen? <span class="opt">(optional)</span></label>
-          <input id="f-invite-note" name="note" maxlength="100" placeholder="z. B. Sam oder WG"></div>
-        <label class="check"><input type="checkbox" name="group"> Gruppenlink (bis 30 Personen)</label>
-        <button class="btn btn--primary" type="submit">${icon('plus')} Link erstellen</button>
-      </form>
-      ${S.invites?.length ? html`<ul class="list invites">${S.invites.map((i) => html`
+      <p class="muted small">FriendSplit ist nur mit Einladung. Wer sich über deinen Link registriert, bekommt automatisch eine Freundschaftsanfrage von dir.</p>
+      ${S.permanentInvite ? html`
+      <div class="permalink">
+        <p class="permalink__title"><strong>Dein Einladungslink</strong> · gilt dauerhaft, für beliebig viele Personen – ideal für eure WhatsApp-Gruppe</p>
+        <code class="permalink__url">${S.permanentInvite.link}</code>
+        <div class="row">
+          <button class="btn btn--primary" data-action="invite-share" data-link="${S.permanentInvite.link}">${icon('share')} Link teilen</button>
+          <button class="btn" data-action="invite-copy" data-link="${S.permanentInvite.link}">${icon('copy')} Kopieren</button>
+        </div>
+        <p class="muted small">${S.permanentInvite.members.length
+          ? `${plural(S.permanentInvite.members.length, 'Person hat', 'Personen haben')} sich darüber registriert: ${joinNames(S.permanentInvite.members)}.`
+          : 'Noch niemand hat sich darüber registriert.'}
+          <button class="linkish" data-action="invite-renew">Neuen Link erzeugen</button></p>
+      </div>` : html`<p class="muted small"><span class="spinner" aria-hidden="true"></span> Link wird geladen …</p>`}
+
+      <details class="account-box">
+        <summary>Link nur für eine Person oder Gruppe (14 Tage)</summary>
+        <form id="invite-form" class="inline-form" novalidate>
+          <div class="field field--grow"><label for="f-invite-note">Für wen? <span class="opt">(optional)</span></label>
+            <input id="f-invite-note" name="note" maxlength="100" placeholder="z. B. Sam oder WG"></div>
+          <label class="check"><input type="checkbox" name="group"> Gruppenlink (bis 30 Personen)</label>
+          <button class="btn btn--primary" type="submit">${icon('plus')} Link erstellen</button>
+        </form>
+      </details>
+      ${temporaryInvites().length ? html`<ul class="list invites">${temporaryInvites().map((i) => html`
         <li class="invite ${i.open ? '' : 'invite--used'}">
           <div><strong>${i.note || (i.group ? 'Gruppenlink' : 'Einladung')}</strong> <code>${i.code}</code>
             <p class="muted small">${i.open ? `${i.group ? `${i.uses} von ${i.max_uses} genutzt · ` : ''}gültig bis ${formatDate(i.expires_at.slice(0, 10))}` : 'verbraucht oder abgelaufen'}${i.members.length ? ` · ${joinNames(i.members)}` : ''}</p></div>
@@ -917,8 +929,18 @@ function viewFriends() {
             ${i.open ? html`<button class="btn btn--small" data-action="invite-share" data-link="${i.link}">${icon('share')} Teilen</button>` : ''}
             <button class="btn-icon btn-icon--danger" data-action="invite-delete" data-code="${i.code}" aria-label="Einladung ${i.code} löschen" title="Löschen">${icon('trash')}</button>
           </div></li>`)}</ul>` : ''}
+    </section>
+
+    <section class="card section" aria-labelledby="search-heading">
+      <h2 id="search-heading">Freunde finden</h2>
+      <div class="field"><label for="f-search">Name suchen</label>
+        <input id="f-search" type="search" value="${S.search.q}" autocomplete="off" placeholder="mind. 2 Buchstaben" aria-describedby="search-results"></div>
+      <ul class="list" id="search-results" aria-live="polite">${searchResults(statusLabel)}</ul>
     </section>`;
 }
+
+/** Einladungen mit Ablaufdatum (der Dauerlink steht separat oben). */
+const temporaryInvites = () => (S.invites ?? []).filter((i) => !i.permanent);
 
 function searchResults(statusLabel = { friend: '✓ Freunde', outgoing: 'Angefragt', incoming: 'Fragt dich an' }) {
   const { q, results } = S.search;
@@ -1588,7 +1610,7 @@ const actions = {
   logout: async (el) => {
     setBusy(el, true, 'Abmelden …');
     try { await api('logout', { body: {} }); } catch { /* trotzdem lokal abmelden */ }
-    Object.assign(S, { user: null, data: null, code: null, dataJson: '', friends: null, invites: null, adminUsers: null, search: { q: '', results: [] } });
+    Object.assign(S, { user: null, data: null, code: null, dataJson: '', friends: null, invites: null, permanentInvite: null, adminUsers: null, search: { q: '', results: [] } });
     go('#/login');
     toast('Du bist abgemeldet.');
   },
@@ -1613,6 +1635,15 @@ const actions = {
       try { await navigator.share({ title: 'FriendSplit', text: `${S.user.name} lädt dich zu FriendSplit ein – damit teilen wir unsere Ausgaben:`, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
     }
     copyText(url, 'Einladungslink kopiert');
+  },
+  'invite-copy': (el) => copyText(el.dataset.link, 'Einladungslink kopiert'),
+  'invite-renew': async () => {
+    if (!await confirmDialog({ title: 'Neuen Einladungslink erzeugen?', text: 'Der bisherige Link funktioniert danach nicht mehr. Wer schon registriert ist, bleibt es natürlich.', confirm: 'Neuen Link erzeugen' })) return;
+    try {
+      S.permanentInvite = (await api('invite_permanent', { body: { renew: true } })).invite;
+      render();
+      toast('Neuer Einladungslink erzeugt – der alte gilt nicht mehr');
+    } catch (error) { toast(error.message, 'error'); }
   },
   'invite-delete': async (el) => {
     try {
