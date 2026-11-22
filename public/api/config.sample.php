@@ -12,6 +12,20 @@ return [
         // 'dsn' => 'sqlite:' . __DIR__ . '/../data/friendsplit.sqlite',
     ],
 
+    // Öffentliche Adresse der App (mit https://). Daraus werden die Links in den E-Mails gebaut
+    // (Bestätigung, Passwort zurücksetzen). Pflicht – ohne sie werden keine E-Mails verschickt.
+    'app_url' => 'https://deine-domain.de/friendsplit/',
+
+    // E-Mail-Versand für Registrierung und „Passwort vergessen“.
+    // ALL-INKL: PHPs mail() funktioniert ohne weitere Einrichtung. Die Absenderadresse muss zu deiner
+    // Domain gehören und sollte im KAS als Postfach oder Weiterleitung existieren.
+    'mail' => [
+        'transport' => 'mail',                // 'mail' = versenden, 'log' = nur in Datei schreiben (Entwicklung)
+        'from'      => 'noreply@deine-domain.de',
+        'from_name' => 'FriendSplit',
+        // 'log_file' => __DIR__ . '/../data/mail.log', // nur für 'transport' => 'log'
+    ],
+
     // Langer Zufallswert (mind. 16 Zeichen) für die einmalige Einrichtung über
     // https://deine-domain.de/friendsplit/api/index.php?action=setup&key=…
     // Nach der Einrichtung leeren, damit der Aufruf deaktiviert ist.

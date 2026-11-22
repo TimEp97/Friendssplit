@@ -373,6 +373,12 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 .payment { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
 .payment--mine { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent), var(--shadow); }
 .payment__text { display: flex; align-items: center; gap: 0.6rem; margin: 0; flex: 1 1 240px; }
+.payment__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; width: 100%; justify-content: flex-end; }
+.btn--paypal:not(.btn--primary) { border-color: #0070ba; color: #0070ba; }
+.btn--paypal.btn--primary { background: #0070ba; border-color: #0070ba; color: #fff; }
+.paypal-chip { font: inherit; font-size: 0.75rem; font-weight: 650; padding: 0.15rem 0.55rem; border-radius: 999px; border: 1px dashed var(--muted); background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.paypal-chip--set { border: 1px solid #0070ba; color: #0070ba; }
+.paypal-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .payment__amount { margin-left: auto; font-weight: 750; font-size: 1.15rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 .balance__head { display: flex; align-items: center; gap: 0.75rem; }
@@ -464,3 +470,22 @@ input[type="checkbox"], input[type="radio"] { width: auto; min-height: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation-duration: 0.01ms !important; scroll-behavior: auto !important; }
 }
+
+/* ---------- Konto: Anmelden, Registrieren, Profil */
+.topbar { display: flex; justify-content: flex-end; margin-bottom: -0.5rem; }
+.hero--auth { padding-bottom: 0.5rem; }
+.hero--auth h1 { font-size: clamp(1.6rem, 6vw, 2.2rem); }
+.notice h2 { margin-top: 0; }
+.notice p { margin: 0 0 0.75rem; }
+.center { text-align: center; }
+.form-actions--split { justify-content: space-between; align-items: center; }
+.profile-head { display: flex; align-items: center; gap: 0.9rem; }
+.profile-head p { margin: 0; }
+.badge--muted { background: transparent; border: 1px solid currentColor; color: var(--muted); font-weight: 600; }
+a.paypal-chip, span.paypal-chip { text-decoration: none; display: inline-block; }
+span.paypal-chip { cursor: default; }
+a.chip { text-decoration: none; }
+.account-box { border-top: 1px solid var(--border); padding: 0.6rem 0; }
+.account-box > summary { font-weight: 650; cursor: pointer; min-height: 32px; display: flex; align-items: center; }
+.account-box[open] > summary { margin-bottom: 0.5rem; }
+.account-box--danger > summary { color: var(--danger); }

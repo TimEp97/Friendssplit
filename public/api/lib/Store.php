@@ -42,23 +42,26 @@ final class Store
     // ------------------------------------------------------------------ Events
 
     /**
+     * Legt ein Event an. Die angemeldete Person wird Organisator:in, weitere Namen sind
+     * Platzhalter, die andere beim Beitreten mit ihrem Konto übernehmen können.
      * @param array<string,mixed> $in
+     * @param array<string,mixed> $user
      * @return array{code:string,person_id:string}
      */
-    public function createEvent(array $in): array
+    public function createEvent(array $in, array $user): array
     {
         $errors = [];
         $name = $this->text($in, 'name', 120, true, $errors, 'Bitte gib einen Eventnamen ein.');
         $date = $this->date($in, 'date', $errors);
         $location = $this->text($in, 'location', 120, false, $errors);
         $notes = $this->text($in, 'notes', 1000, false, $errors);
-        $creator = $this->text($in, 'creator_name', 60, true, $errors, 'Bitte gib deinen Namen ein.');
+        $creator = (string) $user['display_name'];
 
         $others = $in['participants'] ?? [];
         if (!is_array($others)) {
             $others = [];
         }
-        $names = $creator !== null ? [$creator] : [];
+        $names = [$creator];
         foreach ($others as $raw) {
             $clean = is_string($raw) ? $this->cleanText($raw) : '';
             if ($clean === '') {
@@ -92,6 +95,7 @@ final class Store
                 $creatorId ??= $personId;
             }
             $this->db->prepare('UPDATE fs_events SET created_by_person_id = ? WHERE id = ?')->execute([$creatorId, $eventId]);
+            $this->db->prepare('UPDATE fs_persons SET auth_user_id = ? WHERE id = ?')->execute([$user['id'], $creatorId]);
             $this->log($eventId, $creatorId, 'event_created', sprintf('%s hat das Event „%s“ erstellt', $creator, $name));
             $this->db->commit();
         } catch (Throwable $e) {
@@ -117,13 +121,82 @@ final class Store
         return $event;
     }
 
-    /** Gibt die Personen-ID zurück, wenn sie zum Event gehört – sonst null. */
-    public function actor(array $event, ?string $personId): ?string
+    /** Personen-ID des Kontos in diesem Event – oder null, wenn das Konto (noch) nicht teilnimmt. */
+    public function actor(array $event, string $userId): ?string
     {
-        if ($personId === null) {
-            return null;
+        $stmt = $this->db->prepare(
+            'SELECT p.id FROM fs_event_participants ep JOIN fs_persons p ON p.id = ep.person_id
+             WHERE ep.event_id = ? AND p.auth_user_id = ?'
+        );
+        $stmt->execute([$event['id'], $userId]);
+        $id = $stmt->fetchColumn();
+        return $id === false ? null : (string) $id;
+    }
+
+    // ------------------------------------------------------------------ Beitreten
+
+    /**
+     * Tritt dem Event als neue Person bei (Name aus dem Konto, falls keiner angegeben).
+     * @param array<string,mixed> $in
+     * @param array<string,mixed> $user
+     */
+    public function joinEvent(array $event, array $in, array $user): string
+    {
+        $errors = [];
+        $name = $this->text($in, 'name', 60, false, $errors) ?? (string) $user['display_name'];
+        if ($errors) {
+            throw ApiError::validation($errors);
         }
-        return $this->participantName($event['id'], $personId) !== null ? $personId : null;
+        return $this->transaction($event, function () use ($event, $name, $user) {
+            if ($this->actor($event, $user['id']) !== null) {
+                throw new ApiError(409, 'already_member', 'Du nimmst an diesem Event bereits teil.');
+            }
+            $participants = $this->participants($event['id']);
+            if (count($participants) >= self::MAX_PARTICIPANTS) {
+                throw ApiError::validation(['name' => 'Ein Event kann höchstens ' . self::MAX_PARTICIPANTS . ' Teilnehmende haben.']);
+            }
+            $this->assertUniqueName($participants, $name, null);
+            $position = $participants ? max(array_column($participants, 'position')) + 1 : 0;
+            $personId = $this->insertParticipant($event['id'], $name, 'member', $position, Db::now());
+            $this->db->prepare('UPDATE fs_persons SET auth_user_id = ? WHERE id = ?')->execute([$user['id'], $personId]);
+            $this->log($event['id'], $personId, 'participant_joined', sprintf('%s ist dem Event beigetreten', $name));
+            return $personId;
+        });
+    }
+
+    /**
+     * Übernimmt einen Platzhalter-Namen (Person ohne Konto) mit dem eigenen Konto.
+     * @param array<string,mixed> $in
+     * @param array<string,mixed> $user
+     */
+    public function claimPerson(array $event, array $in, array $user): string
+    {
+        $personId = is_string($in['person_id'] ?? null) ? $in['person_id'] : '';
+        return $this->transaction($event, function () use ($event, $personId, $user) {
+            if ($this->actor($event, $user['id']) !== null) {
+                throw new ApiError(409, 'already_member', 'Du nimmst an diesem Event bereits teil.');
+            }
+            $name = $this->participantName($event['id'], $personId);
+            if ($name === null) {
+                throw new ApiError(404, 'person_not_found', 'Diese Person nimmt nicht (mehr) am Event teil.');
+            }
+            $stmt = $this->db->prepare('UPDATE fs_persons SET auth_user_id = ? WHERE id = ? AND auth_user_id IS NULL');
+            $stmt->execute([$user['id'], $personId]);
+            if ($stmt->rowCount() !== 1) {
+                throw new ApiError(409, 'person_taken', sprintf('%s ist bereits mit einem anderen Konto verknüpft.', $name));
+            }
+            $this->log($event['id'], $personId, 'participant_claimed', sprintf('%s hat sich mit dem eigenen Konto angemeldet', $name));
+            return $personId;
+        });
+    }
+
+    /** Löst die Verknüpfung des eigenen Kontos mit der Person (die Person bleibt im Event). */
+    public function releasePerson(array $event, string $actor): void
+    {
+        $this->transaction($event, function () use ($event, $actor) {
+            $this->db->prepare('UPDATE fs_persons SET auth_user_id = NULL WHERE id = ?')->execute([$actor]);
+            $this->log($event['id'], null, 'participant_released', sprintf('%s hat die Verknüpfung mit dem eigenen Konto gelöst', $this->actorName($event, $actor)));
+        });
     }
 
     /** @param array<string,mixed> $in */
@@ -188,6 +261,61 @@ final class Store
             $this->db->prepare('UPDATE fs_persons SET display_name = ? WHERE id = ?')->execute([$name, $personId]);
             $this->log($event['id'], $actor, 'participant_renamed', sprintf('%s hat %s in %s umbenannt', $this->actorName($event, $actor), $old, $name));
         });
+    }
+
+    /**
+     * Hinterlegt den PayPal.me-Namen einer Person ohne Konto (leer = entfernen). Personen mit
+     * Konto pflegen ihn in ihrem Profil. Akzeptiert den Namen,
+     * „@name“ oder einen PayPal.me-Link, wie er auch im PayPal-QR-Code steckt.
+     * @param array<string,mixed> $in
+     */
+    public function setPaypal(array $event, array $in, ?string $actor): void
+    {
+        $personId = is_string($in['person_id'] ?? null) ? $in['person_id'] : '';
+        $raw = is_string($in['paypal'] ?? null) ? $this->cleanText($in['paypal']) : '';
+        $handle = null;
+        if ($raw !== '') {
+            $handle = self::normalizePaypal($raw);
+            if ($handle === null) {
+                throw ApiError::validation(['paypal' => self::paypalError($raw)]);
+            }
+        }
+        $this->transaction($event, function () use ($event, $personId, $handle, $actor) {
+            $name = $this->participantName($event['id'], $personId);
+            if ($name === null) {
+                throw new ApiError(404, 'person_not_found', 'Diese Person nimmt nicht (mehr) am Event teil.');
+            }
+            $linked = $this->db->prepare('SELECT auth_user_id FROM fs_persons WHERE id = ?');
+            $linked->execute([$personId]);
+            if ($linked->fetchColumn() !== null) {
+                throw new ApiError(409, 'paypal_from_profile', sprintf('%s hat ein Konto – der PayPal.me-Link kommt aus dem Profil und kann nur dort geändert werden.', $name));
+            }
+            $this->db->prepare('UPDATE fs_persons SET paypal_me = ? WHERE id = ?')->execute([$handle, $personId]);
+            $self = $actor === $personId;
+            $who = $self ? $name : $this->actorName($event, $actor);
+            $this->log($event['id'], $actor, 'paypal_changed', $handle !== null
+                ? sprintf('%s hat %s PayPal.me-Link hinterlegt', $who, $self ? 'den eigenen' : "einen für $name")
+                : sprintf('%s hat %s PayPal.me-Link entfernt', $who, $self ? 'den eigenen' : "den von $name"));
+        });
+    }
+
+    public static function paypalError(string $raw): string
+    {
+        return str_contains(strtolower($raw), 'paypal.com/qrcodes')
+            ? 'Dieser QR-Code enthält keinen PayPal.me-Namen. Bitte gib deinen PayPal.me-Link ein, z. B. paypal.me/deinname.'
+            : 'Bitte gib einen gültigen PayPal.me-Link oder -Namen ein, z. B. paypal.me/deinname.';
+    }
+
+    /** PayPal.me-Name aus Eingabe oder Link extrahieren; ungültig → null. */
+    public static function normalizePaypal(string $raw): ?string
+    {
+        $value = trim($raw);
+        if (preg_match('~^(?:https?://)?(?:www\.)?(?:paypal\.me|paypal\.com/(?:[a-z]{2}/)?paypalme)/@?([^/?#\s]+)~i', $value, $m)) {
+            $value = $m[1];
+        } elseif (str_starts_with($value, '@')) {
+            $value = substr($value, 1);
+        }
+        return preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/', $value) ? $value : null;
     }
 
     /** @param array<string,mixed> $in */
@@ -407,7 +535,7 @@ final class Store
     // ------------------------------------------------------------------ Gesamtzustand
 
     /** @return array<string,mixed> */
-    public function state(array $event): array
+    public function state(array $event, ?string $actor = null): array
     {
         $eventId = $event['id'];
         $participants = $this->participants($eventId);
@@ -472,7 +600,10 @@ final class Store
                 'created_at' => $this->isoUtc($event['created_at']),
                 'updated_at' => $this->isoUtc($event['updated_at']),
             ],
-            'participants' => array_map(fn ($p) => ['id' => $p['id'], 'name' => $p['name'], 'role' => $p['role']], $participants),
+            'me' => $actor,
+            'participants' => array_map(fn ($p) => [
+                'id' => $p['id'], 'name' => $p['name'], 'paypal' => $p['paypal'], 'linked' => $p['linked'], 'role' => $p['role'],
+            ], $participants),
             'expenses' => $expenses,
             'settlements' => $settlements,
             'summary' => [
@@ -545,16 +676,25 @@ final class Store
         ];
     }
 
-    /** @return array<int,array{id:string,name:string,role:string,position:int}> */
+    /** @return array<int,array{id:string,name:string,paypal:?string,linked:bool,role:string,position:int}> */
     private function participants(string $eventId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT p.id, p.display_name AS name, ep.role, ep.position
+            'SELECT p.id, p.display_name AS name, p.paypal_me, p.auth_user_id, u.paypal_me AS user_paypal, ep.role, ep.position
              FROM fs_event_participants ep JOIN fs_persons p ON p.id = ep.person_id
+             LEFT JOIN fs_users u ON u.id = p.auth_user_id
              WHERE ep.event_id = ? ORDER BY ep.position, ep.joined_at'
         );
         $stmt->execute([$eventId]);
-        return array_map(fn ($r) => ['id' => $r['id'], 'name' => $r['name'], 'role' => $r['role'], 'position' => (int) $r['position']], $stmt->fetchAll());
+        return array_map(fn ($r) => [
+            'id' => $r['id'],
+            'name' => $r['name'],
+            // Personen mit Konto: PayPal.me-Link aus dem Profil; Platzhalter: im Event hinterlegter Link.
+            'paypal' => $r['auth_user_id'] !== null ? $r['user_paypal'] : $r['paypal_me'],
+            'linked' => $r['auth_user_id'] !== null,
+            'role' => $r['role'],
+            'position' => (int) $r['position'],
+        ], $stmt->fetchAll());
     }
 
     private function participantName(string $eventId, string $personId): ?string
