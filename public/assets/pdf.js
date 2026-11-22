@@ -116,7 +116,8 @@ class Pdf {
 
   /** QR-Code als Vektorgrafik (schwarze Module als Rechtecke). */
   qr(text, x, y, size) {
-    const code = qrcode(0, 'M');
+    // Lange Links mit niedrigerer Fehlerkorrektur – weniger, größere Module, leichter zu scannen
+    const code = qrcode(0, text.length > 70 ? 'L' : 'M');
     code.addData(text);
     code.make();
     const count = code.getModuleCount();
@@ -182,6 +183,11 @@ const dateTimeFmt = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2
 const CATEGORY = { getraenke: 'Getränke', essen: 'Essen', tickets: 'Tickets', transport: 'Transport', unterkunft: 'Unterkunft', sonstiges: 'Sonstiges' };
 
 /** PayPal.me-Link, der direkt mit dem Betrag öffnet. */
+/** Fertiger Zahlungslink an eine E-Mail-Adresse („Waren & Dienstleistungen“ – Gebühren für den Empfänger). */
+export const paypalInstantLink = (email, cents, note) => `https://www.paypal.com/cgi-bin/webscr?${new URLSearchParams({
+  cmd: '_xclick', business: email, amount: (cents / 100).toFixed(2), currency_code: 'EUR', ...(note ? { item_name: note } : {}),
+})}`;
+
 export const paypalLink = (handle, cents) => `https://www.paypal.me/${encodeURIComponent(handle)}${cents ? `/${(cents / 100).toFixed(2)}EUR` : ''}`;
 
 /**
@@ -194,6 +200,7 @@ export function settlementPdf(data, { link, appUrl }) {
   const { event, participants, expenses, settlements, summary } = data;
   const name = (id) => participants.find((p) => p.id === id)?.name ?? 'Ehemalige Person';
   const paypalOf = (id) => participants.find((p) => p.id === id)?.paypal ?? null;
+  const paypalMailOf = (id) => participants.find((p) => p.id === id)?.paypal_email ?? null;
   const doc = new Pdf();
   const left = MARGIN;
   const right = A4.w - MARGIN;
@@ -245,12 +252,13 @@ export function settlementPdf(data, { link, appUrl }) {
   }
   for (const pay of summary.plan) {
     const handle = paypalOf(pay.to);
-    const h = handle ? 104 : 46;
+    const mail = handle ? null : paypalMailOf(pay.to);
+    const h = handle || mail ? 104 : 46;
     doc.ensure(h + 10);
     const top = doc.y + 8;
     doc.roundRect(left, top - h, width, h, 8, { stroke: COLORS.line });
     doc.text(`${name(pay.from)} zahlt ${name(pay.to)}`, left + 14, top - 22, { size: 12, font: 'F2' });
-    doc.text(euro(pay.amount_cents), handle ? right - 112 : right - 14, top - 22, { size: 14, font: 'F2', align: 'right' });
+    doc.text(euro(pay.amount_cents), handle || mail ? right - 112 : right - 14, top - 22, { size: 14, font: 'F2', align: 'right' });
     if (handle) {
       const url = paypalLink(handle, pay.amount_cents);
       doc.text('Per PayPal bezahlen – QR-Code scannen oder Link antippen:', left + 14, top - 42, { size: 9, color: COLORS.muted });
@@ -258,8 +266,15 @@ export function settlementPdf(data, { link, appUrl }) {
       doc.link(left + 14, top - 61, Math.min(doc.width(url, 9.5), width - 140), 13, url);
       doc.text(`PayPal.me/${handle} · Betrag ist schon eingetragen`, left + 14, top - 72, { size: 8.5, color: COLORS.muted });
       doc.qr(url, right - 96, top - h + 8, 88);
+    } else if (mail) {
+      doc.text('Per PayPal an diese E-Mail-Adresse senden:', left + 14, top - 42, { size: 9, color: COLORS.muted });
+      doc.text(doc.fit(mail, 12, 'F2', width - 140), left + 14, top - 58, { size: 12, font: 'F2', color: COLORS.paypal });
+      doc.text('In PayPal „Geld senden“ -> E-Mail und Betrag eingeben -> „Freunde & Familie“ (kostenlos).', left + 14, top - 73, { size: 8.5, color: COLORS.muted });
+      doc.text('QR-Code: Sofort bezahlen, Betrag schon eingetragen – der Empfänger zahlt PayPal-Gebühren.', left + 14, top - 86, { size: 8, color: COLORS.muted });
+      // Kurzer Link (ohne Betreff), damit der QR-Code grob bleibt und sich gut scannen lässt
+      doc.qr(paypalInstantLink(mail, pay.amount_cents), right - 96, top - h + 8, 88);
     } else {
-      doc.text(`${name(pay.to)} hat keinen PayPal.me-Link hinterlegt – bitte direkt ausgleichen.`, left + 14, top - 38, { size: 9, color: COLORS.muted });
+      doc.text(`${name(pay.to)} hat kein PayPal hinterlegt – bitte direkt ausgleichen.`, left + 14, top - 38, { size: 9, color: COLORS.muted });
     }
     doc.y = top - h - 10;
   }

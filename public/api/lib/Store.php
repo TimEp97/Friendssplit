@@ -334,23 +334,15 @@ final class Store
     }
 
     /**
-     * Hinterlegt den PayPal.me-Namen einer Person ohne Konto (leer = entfernen). Personen mit
-     * Konto pflegen ihn in ihrem Profil. Akzeptiert den Namen,
-     * „@name“ oder einen PayPal.me-Link, wie er auch im PayPal-QR-Code steckt.
+     * Hinterlegt PayPal für eine Person ohne Konto (leer = entfernen): E-Mail-Adresse oder PayPal.me-Link.
+     * Personen mit Konto pflegen das in ihrem Profil.
      * @param array<string,mixed> $in
      */
     public function setPaypal(array $event, array $in, ?string $actor): void
     {
         $personId = is_string($in['person_id'] ?? null) ? $in['person_id'] : '';
-        $raw = is_string($in['paypal'] ?? null) ? $this->cleanText($in['paypal']) : '';
-        $handle = null;
-        if ($raw !== '') {
-            $handle = self::normalizePaypal($raw);
-            if ($handle === null) {
-                throw ApiError::validation(['paypal' => self::paypalError($raw)]);
-            }
-        }
-        $this->transaction($event, function () use ($event, $personId, $handle, $actor) {
+        ['me' => $handle, 'email' => $email] = self::parsePaypal(is_string($in['paypal'] ?? null) ? $this->cleanText($in['paypal']) : '');
+        $this->transaction($event, function () use ($event, $personId, $handle, $email, $actor) {
             $name = $this->participantName($event['id'], $personId);
             if ($name === null) {
                 throw new ApiError(404, 'person_not_found', 'Diese Person nimmt nicht (mehr) am Event teil.');
@@ -358,22 +350,44 @@ final class Store
             $linked = $this->db->prepare('SELECT auth_user_id FROM fs_persons WHERE id = ?');
             $linked->execute([$personId]);
             if ($linked->fetchColumn() !== null) {
-                throw new ApiError(409, 'paypal_from_profile', sprintf('%s hat ein Konto – der PayPal.me-Link kommt aus dem Profil und kann nur dort geändert werden.', $name));
+                throw new ApiError(409, 'paypal_from_profile', sprintf('%s hat ein Konto – PayPal kommt aus dem Profil und kann nur dort geändert werden.', $name));
             }
-            $this->db->prepare('UPDATE fs_persons SET paypal_me = ? WHERE id = ?')->execute([$handle, $personId]);
+            $this->db->prepare('UPDATE fs_persons SET paypal_me = ?, paypal_email = ? WHERE id = ?')->execute([$handle, $email, $personId]);
             $self = $actor === $personId;
             $who = $self ? $name : $this->actorName($event, $actor);
-            $this->log($event['id'], $actor, 'paypal_changed', $handle !== null
-                ? sprintf('%s hat %s PayPal.me-Link hinterlegt', $who, $self ? 'den eigenen' : "einen für $name")
-                : sprintf('%s hat %s PayPal.me-Link entfernt', $who, $self ? 'den eigenen' : "den von $name"));
+            $this->log($event['id'], $actor, 'paypal_changed', $handle !== null || $email !== null
+                ? sprintf('%s hat %s PayPal hinterlegt', $who, $self ? 'das eigene' : "für $name")
+                : sprintf('%s hat %s PayPal entfernt', $who, $self ? 'das eigene' : "das von $name"));
         });
     }
 
     public static function paypalError(string $raw): string
     {
         return str_contains(strtolower($raw), 'paypal.com/qrcodes')
-            ? 'Dieser QR-Code enthält keinen PayPal.me-Namen. Bitte gib deinen PayPal.me-Link ein, z. B. paypal.me/deinname.'
-            : 'Bitte gib einen gültigen PayPal.me-Link oder -Namen ein, z. B. paypal.me/deinname.';
+            ? 'Dieser QR-Code enthält keinen PayPal.me-Namen. Gib einfach deine PayPal-E-Mail-Adresse ein.'
+            : 'Bitte gib deine PayPal-E-Mail-Adresse ein (z. B. name@gmail.com) – oder einen PayPal.me-Link.';
+    }
+
+    /**
+     * PayPal-Eingabe auswerten: E-Mail-Adresse des PayPal-Kontos oder PayPal.me-Link/-Name.
+     * Leer = beides entfernen. Ungültig → Validierungsfehler.
+     * @return array{me:?string,email:?string}
+     */
+    public static function parsePaypal(string $raw): array
+    {
+        $value = trim($raw);
+        if ($value === '') {
+            return ['me' => null, 'email' => null];
+        }
+        if (!str_starts_with($value, '@') && str_contains($value, '@')) {
+            $email = mb_strtolower(preg_replace('/^mailto:/i', '', $value) ?? $value);
+            if (mb_strlen($email) <= 190 && filter_var($email, FILTER_VALIDATE_EMAIL)) {
+                return ['me' => null, 'email' => $email];
+            }
+            throw ApiError::validation(['paypal' => 'Diese E-Mail-Adresse sieht nicht gültig aus. Bitte prüfe sie.']);
+        }
+        $handle = self::normalizePaypal($value) ?? throw ApiError::validation(['paypal' => self::paypalError($value)]);
+        return ['me' => $handle, 'email' => null];
     }
 
     /** PayPal.me-Name aus Eingabe oder Link extrahieren; ungültig → null. */
@@ -676,7 +690,7 @@ final class Store
             ],
             'me' => $actor,
             'participants' => array_map(fn ($p) => [
-                'id' => $p['id'], 'name' => $p['name'], 'paypal' => $p['paypal'], 'linked' => $p['linked'], 'user_id' => $p['user_id'], 'role' => $p['role'],
+                'id' => $p['id'], 'name' => $p['name'], 'paypal' => $p['paypal'], 'paypal_email' => $p['paypal_email'], 'linked' => $p['linked'], 'user_id' => $p['user_id'], 'role' => $p['role'],
             ], $participants),
             'expenses' => $expenses,
             'settlements' => $settlements,
@@ -750,11 +764,12 @@ final class Store
         ];
     }
 
-    /** @return array<int,array{id:string,name:string,paypal:?string,linked:bool,user_id:?string,role:string,position:int}> */
+    /** @return array<int,array{id:string,name:string,paypal:?string,paypal_email:?string,linked:bool,user_id:?string,role:string,position:int}> */
     private function participants(string $eventId): array
     {
         $stmt = $this->db->prepare(
-            'SELECT p.id, p.display_name AS name, p.paypal_me, p.auth_user_id, u.paypal_me AS user_paypal, ep.role, ep.position
+            'SELECT p.id, p.display_name AS name, p.paypal_me, p.paypal_email, p.auth_user_id,
+                    u.paypal_me AS user_paypal, u.paypal_email AS user_paypal_email, ep.role, ep.position
              FROM fs_event_participants ep JOIN fs_persons p ON p.id = ep.person_id
              LEFT JOIN fs_users u ON u.id = p.auth_user_id
              WHERE ep.event_id = ? ORDER BY ep.position, ep.joined_at'
@@ -765,6 +780,7 @@ final class Store
             'name' => $r['name'],
             // Personen mit Konto: PayPal.me-Link aus dem Profil; Platzhalter: im Event hinterlegter Link.
             'paypal' => $r['auth_user_id'] !== null ? $r['user_paypal'] : $r['paypal_me'],
+            'paypal_email' => $r['auth_user_id'] !== null ? $r['user_paypal_email'] : $r['paypal_email'],
             'linked' => $r['auth_user_id'] !== null,
             'user_id' => $r['auth_user_id'],
             'role' => $r['role'],

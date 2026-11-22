@@ -172,7 +172,7 @@ final class Social
     public function friends(array $user): array
     {
         $stmt = $this->db->prepare(
-            "SELECT f.requester_id, f.addressee_id, f.status, f.created_at, f.accepted_at, u.id, u.display_name, u.paypal_me
+            "SELECT f.requester_id, f.addressee_id, f.status, f.created_at, f.accepted_at, u.id, u.display_name, u.paypal_me, u.paypal_email
              FROM fs_friends f JOIN fs_users u ON u.id = CASE WHEN f.requester_id = ? THEN f.addressee_id ELSE f.requester_id END
              WHERE (f.requester_id = ? OR f.addressee_id = ?) AND u.blocked = 0 AND u.email_verified_at IS NOT NULL
              ORDER BY u.username_key"
@@ -182,7 +182,7 @@ final class Social
         foreach ($stmt->fetchAll() as $r) {
             $entry = ['id' => $r['id'], 'name' => $r['display_name']];
             if ($r['status'] === 'accepted') {
-                $out['friends'][] = $entry + ['paypal' => $r['paypal_me'], 'since' => self::iso($r['accepted_at'] ?? $r['created_at'])];
+                $out['friends'][] = $entry + ['paypal' => $r['paypal_me'] ?? $r['paypal_email'], 'since' => self::iso($r['accepted_at'] ?? $r['created_at'])];
             } elseif ($r['addressee_id'] === $user['id']) {
                 $out['incoming'][] = $entry;
             } else {

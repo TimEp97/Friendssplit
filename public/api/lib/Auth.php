@@ -421,22 +421,20 @@ final class Auth
             }
         }
         $handle = $user['paypal_me'];
+        $paypalEmail = $user['paypal_email'] ?? null;
         if (array_key_exists('paypal', $in)) {
-            $raw = is_string($in['paypal']) ? trim($in['paypal']) : '';
-            $handle = null;
-            if ($raw !== '') {
-                $handle = Store::normalizePaypal($raw);
-                if ($handle === null) {
-                    $errors['paypal'] = Store::paypalError($raw);
-                }
+            try {
+                ['me' => $handle, 'email' => $paypalEmail] = Store::parsePaypal(is_string($in['paypal']) ? $in['paypal'] : '');
+            } catch (ApiError $e) {
+                $errors += $e->fields;
             }
         }
         if ($errors) {
             throw ApiError::validation($errors);
         }
         // Der Name gilt für neue Events und bei Freunden. In bestehenden Events bleibt der dort verwendete Name.
-        $this->db->prepare('UPDATE fs_users SET display_name = ?, username_key = ?, paypal_me = ?, updated_at = ? WHERE id = ?')
-            ->execute([$name, self::key($name), $handle, Db::now(), $user['id']]);
+        $this->db->prepare('UPDATE fs_users SET display_name = ?, username_key = ?, paypal_me = ?, paypal_email = ?, updated_at = ? WHERE id = ?')
+            ->execute([$name, self::key($name), $handle, $paypalEmail, Db::now(), $user['id']]);
         return $this->userById($user['id']);
     }
 
@@ -592,6 +590,7 @@ final class Auth
             'pending_email' => $user['pending_email'] ?? null,
             'name' => $user['display_name'],
             'paypal' => $user['paypal_me'],
+            'paypal_email' => $user['paypal_email'] ?? null,
             'role' => $user['role'],
             'friend_requests' => (int) $requests->fetchColumn(),
             'events' => array_map(fn ($r) => [
