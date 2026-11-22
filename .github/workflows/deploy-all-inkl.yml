@@ -1,0 +1,53 @@
+# FriendSplit auf den ALL-INKL-Webspace hochladen.
+#
+# Startet nur von Hand: GitHub → Actions → „Deploy zu ALL-INKL“ → „Run workflow“.
+# Erst laufen die Tests, nur wenn sie grün sind, wird per FTPS (verschlüsseltes FTP) hochgeladen.
+#
+# Einmalig unter Settings → Secrets and variables → Actions → „New repository secret“ anlegen:
+#   FTP_SERVER     z. B. w0123456.kasserver.com  (KAS → FTP)
+#   FTP_USERNAME   FTP-Benutzer, z. B. w0123456 oder ein eigener FTP-Zugang
+#   FTP_PASSWORD   Passwort des FTP-Benutzers
+#   FTP_DIR        Zielordner mit / am Ende, z. B. /friendsplit/ oder /deine-domain.de/friendsplit/
+#
+# api/config.php wird nie hochgeladen oder überschrieben (liegt nicht im Repository).
+name: Deploy zu ALL-INKL
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-all-inkl
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: PHP-Version
+        run: php -v && php -m | grep -i -E 'pdo_sqlite|mbstring'
+      - name: Rechenlogik testen
+        run: php tests/SplitTest.php
+      - name: API testen
+        run: php tests/ApiTest.php
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hochladen per FTPS
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_SERVER }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          protocol: ftps
+          local-dir: ./public/
+          server-dir: ${{ secrets.FTP_DIR }}
+          exclude: |
+            **/.git*
+            **/.git*/**
+            api/config.php
+            data/*.sqlite*
+            data/mail.log

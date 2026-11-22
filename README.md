@@ -55,6 +55,21 @@ tests/                   SplitTest.php (Berechnung), ApiTest.php (API end-to-end
 5. **HTTPS:** Im KAS ein (kostenloses Let's-Encrypt-)Zertifikat für die Domain aktivieren. Kopieren und Teilen von Links funktionieren im Browser nur über HTTPS zuverlässig.
 6. **Einbinden:** Auf der bestehenden Webseite einen Link auf `/friendsplit/` setzen. Alle Pfade sind relativ, der Ordnername ist frei wählbar.
 
+### Automatisch hochladen mit GitHub Actions
+
+Statt per FTP-Programm kann GitHub die Dateien hochladen (`.github/workflows/deploy-all-inkl.yml`):
+
+1. **Secrets anlegen:** Im Repository unter *Settings → Secrets and variables → Actions* vier Secrets eintragen:
+   - `FTP_SERVER` (z. B. `w0123456.kasserver.com`)
+   - `FTP_USERNAME`
+   - `FTP_PASSWORD`
+   - `FTP_DIR` (Zielordner mit `/` am Ende, z. B. `/friendsplit/`)
+   Am besten legst du im KAS einen eigenen FTP-Benutzer an, der nur auf diesen Ordner zugreifen darf.
+2. **Starten:** *Actions → Deploy zu ALL-INKL → Run workflow*. Erst laufen die Tests, danach lädt GitHub den Inhalt von `public/` per FTPS hoch. Später werden nur geänderte Dateien übertragen.
+3. `api/config.php` auf dem Server wird dabei nie überschrieben. Neue Einstellungen trägst du dort weiterhin selbst ein.
+
+Der Workflow erscheint unter *Actions* erst, wenn er auf dem Standard-Branch (`main`) liegt.
+
 ### Update einer bestehenden Installation
 
 Neue Dateien per FTP hochladen (deine `api/config.php` bleibt unverändert). Danach die Datenbank einmal nachrüsten:
