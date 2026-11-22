@@ -1,0 +1,34 @@
+# Misst die Ladezeiten der Live-Seite (Verbindung, Serverantwort, Größe, Komprimierung).
+# Von Hand starten: Actions → „Ladezeiten messen“ → Run workflow. Ändert nichts auf dem Server.
+name: Ladezeiten messen
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/zen-galileo-cpwhlz]
+    paths: [.github/workflows/perf.yml]
+
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    env:
+      BASE: https://friendssplitt.stuttgartapps.de/
+    steps:
+      - name: Ladezeiten
+        run: |
+          fmt='code %{http_code}  dns %{time_namelookup}s  verbindung %{time_connect}s  tls %{time_appconnect}s  erste-antwort %{time_starttransfer}s  gesamt %{time_total}s  bytes %{size_download}\n'
+          for path in "" "assets/app.js" "assets/app.css" "api/index.php?action=status" "api/index.php?action=me"; do
+            echo "== /$path"
+            for i in 1 2 3 4 5; do
+              curl -s -o /dev/null -H 'Accept-Encoding: gzip, br' -w "$fmt" "$BASE$path"
+            done
+          done
+          echo "== Header app.js"
+          curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip, br' "${BASE}assets/app.js" | grep -iE '^(HTTP|content-encoding|content-length|cache-control|etag|last-modified|server|x-powered-by)'
+          echo "== Header index.html"
+          curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip, br' "$BASE" | grep -iE '^(HTTP|content-encoding|content-length|cache-control|server)'
+          echo "== Header API"
+          curl -s -D - -o /dev/null "${BASE}api/index.php?action=status" | grep -iE '^(HTTP|content-encoding|cache-control|server|x-powered-by)'
+          echo "== Wiederholter Abruf app.js mit ETag (sollte 304 sein)"
+          etag=$(curl -s -D - -o /dev/null "${BASE}assets/app.js" | grep -i '^etag' | cut -d' ' -f2- | tr -d '\r')
+          curl -s -o /dev/null -H "If-None-Match: $etag" -w "$fmt" "${BASE}assets/app.js"
