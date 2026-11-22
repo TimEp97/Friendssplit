@@ -8,7 +8,7 @@
 # Dann in GitHub → Settings → Secrets and variables → Actions:
 #   KEY_FRIENDSPLIT  Passwort des FTP-Benutzers (alternativ KEY_FRIENSSPLIT oder FTP_PASSWORD)
 #   (FTP-Benutzer f018eadd steht unten unter env – auf /friendssplitt.stuttgartapps.de/ beschränkt, daher Zielordner ./)
-#   DB_NAME          Datenbankname aus Schritt 3 (z. B. d0xxxxxx)
+#   (Datenbank d0488808 steht unten unter env – per Secret DB_NAME überschreibbar)
 #   DB_PASSWORD      optional: Datenbank-Passwort (sonst gilt KEY_FRIENDSPLIT – wenn du dasselbe Passwort vergibst)
 #   SETUP_CODE       optional: Code zum Anlegen des ersten Kontos, mind. 12 Zeichen (sonst gilt das Datenbank-Passwort)
 # Server und Zielordner stehen unten unter env (keine Geheimnisse; per Secret FTP_SERVER, FTP_DIR überschreibbar).
@@ -33,6 +33,7 @@ env:
   FTP_USERNAME: ${{ secrets.FTP_USERNAME || vars.FTP_USERNAME || 'f018eadd' }}
   FTP_DIR: ${{ secrets.FTP_DIR || vars.FTP_DIR || './' }}
   MAIL_FROM: noreply@stuttgartapps.de
+  DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME || 'd0488808' }}
 
 jobs:
   deploy:
@@ -55,7 +56,6 @@ jobs:
         if: github.ref_name == github.event.repository.default_branch
         env:
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT }}
-          DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
         run: |
           missing=""
           [ -n "$FTP_USERNAME" ] || missing="$missing FTP_USERNAME"
@@ -72,7 +72,6 @@ jobs:
       - name: Server-Konfiguration schreiben
         if: steps.creds.outputs.ok == 'true'
         env:
-          DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD || secrets.KEY_FRIENDSPLIT || secrets.KEY_FRIENSSPLIT || secrets.FTP_PASSWORD }}
           SETUP_CODE: ${{ secrets.SETUP_CODE }}
         run: |
