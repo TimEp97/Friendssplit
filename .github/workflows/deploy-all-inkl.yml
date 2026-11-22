@@ -7,7 +7,7 @@
 #
 # Dann in GitHub → Settings → Secrets and variables → Actions:
 #   KEY_FRIENDSPLIT  Passwort des FTP-Benutzers (alternativ FTP_PASSWORD)
-#   FTP_USERNAME     der FTP-Benutzer aus Schritt 2 (z. B. f0xxxxxx)
+#   (FTP-Benutzer f018eadd steht unten unter env – auf /friendssplitt.stuttgartapps.de/ beschränkt, daher Zielordner ./)
 #   DB_NAME          Datenbankname aus Schritt 3 (z. B. d0xxxxxx)
 #   DB_PASSWORD      optional: Datenbank-Passwort (sonst gilt KEY_FRIENDSPLIT – wenn du dasselbe Passwort vergibst)
 #   SETUP_CODE       optional: Code zum Anlegen des ersten Kontos, mind. 12 Zeichen (sonst gilt das Datenbank-Passwort)
@@ -30,6 +30,7 @@ concurrency:
 env:
   APP_URL: ${{ vars.APP_URL || 'https://friendssplitt.stuttgartapps.de/' }}
   FTP_SERVER: ${{ secrets.FTP_SERVER || vars.FTP_SERVER || 'w0222c40.kasserver.com' }}
+  FTP_USERNAME: ${{ secrets.FTP_USERNAME || vars.FTP_USERNAME || 'f018eadd' }}
   FTP_DIR: ${{ secrets.FTP_DIR || vars.FTP_DIR || './' }}
   MAIL_FROM: noreply@stuttgartapps.de
 
@@ -53,7 +54,6 @@ jobs:
         id: creds
         if: github.ref_name == github.event.repository.default_branch
         env:
-          FTP_USERNAME: ${{ secrets.FTP_USERNAME || vars.FTP_USERNAME }}
           FTP_PASSWORD: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
           DB_NAME: ${{ secrets.DB_NAME || vars.DB_NAME }}
         run: |
@@ -100,7 +100,7 @@ jobs:
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ env.FTP_SERVER }}
-          username: ${{ secrets.FTP_USERNAME || vars.FTP_USERNAME }}
+          username: ${{ env.FTP_USERNAME }}
           password: ${{ secrets.FTP_PASSWORD || secrets.KEY_FRIENDSPLIT }}
           protocol: ftps
           local-dir: ./public/

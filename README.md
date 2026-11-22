@@ -52,12 +52,11 @@ Eingerichtet wie die Reiseapp: Bei jedem Push auf den Haupt-Branch testet GitHub
 | Secret | Wert |
 | --- | --- |
 | `KEY_FRIENDSPLIT` | Passwort des FTP-Benutzers |
-| `FTP_USERNAME` | FTP-Benutzer aus Schritt 2, z. B. `f0xxxxxx` |
 | `DB_NAME` | Datenbank aus Schritt 3, z. B. `d0xxxxxx` |
 | `DB_PASSWORD` | optional, nur wenn das Datenbank-Passwort anders ist als `KEY_FRIENDSPLIT` |
 | `SETUP_CODE` | optional, Code für das erste Konto (mind. 12 Zeichen). Ohne ihn gilt das Datenbank-Passwort |
 
-Server (`w0222c40.kasserver.com`) und Zielordner (`./`) stehen im Workflow und lassen sich per Secret `FTP_SERVER` bzw. `FTP_DIR` überschreiben. Fehlen Secrets, laufen nur die Tests und der Upload wird übersprungen.
+Server (`w0222c40.kasserver.com`), FTP-Benutzer (`f018eadd`, im KAS auf `/friendssplitt.stuttgartapps.de/` beschränkt) und Zielordner (`./`) stehen im Workflow und lassen sich per Secret `FTP_SERVER`, `FTP_USERNAME` bzw. `FTP_DIR` überschreiben. Fehlen Secrets, laufen nur die Tests und der Upload wird übersprungen.
 
 **Hochladen:** passiert automatisch bei jedem Push auf den Haupt-Branch. Von Hand: *Actions → Deploy zu ALL-INKL → Run workflow*.
 
