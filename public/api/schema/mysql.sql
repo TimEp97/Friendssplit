@@ -102,19 +102,24 @@ CREATE TABLE IF NOT EXISTS fs_activity (
   CONSTRAINT fk_activity_event FOREIGN KEY (event_id) REFERENCES fs_events (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Benutzerkonten (Anmeldung mit E-Mail und Passwort, E-Mail-Bestätigung)
+-- Benutzerkonten (nur mit Einladung; Anmeldung mit Name oder E-Mail und Passwort)
 CREATE TABLE IF NOT EXISTS fs_users (
   id                CHAR(16)     NOT NULL,
+  display_name      VARCHAR(32)  NOT NULL,
+  username_key      VARCHAR(32)  NOT NULL,
   email             VARCHAR(190) NOT NULL,
   pending_email     VARCHAR(190) NULL,
   password_hash     VARCHAR(255) NOT NULL,
-  display_name      VARCHAR(60)  NOT NULL,
+  role              VARCHAR(10)  NOT NULL DEFAULT 'user',
   paypal_me         VARCHAR(40)  NULL,
   email_verified_at DATETIME     NULL,
+  blocked           TINYINT      NOT NULL DEFAULT 0,
+  last_login_at     DATETIME     NULL,
   created_at        DATETIME     NOT NULL,
   updated_at        DATETIME     NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_users_email (email)
+  UNIQUE KEY uq_users_email (email),
+  UNIQUE KEY uq_users_name (username_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Angemeldete Sitzungen. Gespeichert wird nur der SHA-256-Hash des Cookie-Werts.
@@ -128,7 +133,33 @@ CREATE TABLE IF NOT EXISTS fs_sessions (
   CONSTRAINT fk_sessions_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Einmal-Links aus E-Mails (purpose: verify = E-Mail bestätigen, reset = Passwort zurücksetzen). Nur Hashes.
+-- Bekannte Geräte: dort ist beim Anmelden kein Code aus der E-Mail nötig (Hash des Geräte-Cookies).
+CREATE TABLE IF NOT EXISTS fs_devices (
+  token_hash   CHAR(64) NOT NULL,
+  user_id      CHAR(16) NOT NULL,
+  created_at   DATETIME NOT NULL,
+  last_used_at DATETIME NOT NULL,
+  PRIMARY KEY (token_hash),
+  KEY idx_devices_user (user_id),
+  CONSTRAINT fk_devices_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Offene 6-stellige Codes aus der E-Mail (purpose: verify = E-Mail bestätigen, login = neues Gerät).
+CREATE TABLE IF NOT EXISTS fs_codes (
+  token_hash CHAR(64)    NOT NULL,
+  user_id    CHAR(16)    NOT NULL,
+  purpose    VARCHAR(8)  NOT NULL,
+  code_hash  CHAR(64)    NOT NULL,
+  attempts   INT         NOT NULL DEFAULT 0,
+  sends      INT         NOT NULL DEFAULT 1,
+  sent_at    DATETIME    NOT NULL,
+  expires_at DATETIME    NOT NULL,
+  PRIMARY KEY (token_hash),
+  KEY idx_codes_user (user_id),
+  CONSTRAINT fk_codes_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Links aus E-Mails (purpose: reset = Passwort zurücksetzen, email = neue Adresse bestätigen). Nur Hashes.
 CREATE TABLE IF NOT EXISTS fs_user_tokens (
   token_hash CHAR(64)    NOT NULL,
   user_id    CHAR(16)    NOT NULL,
@@ -140,10 +171,51 @@ CREATE TABLE IF NOT EXISTS fs_user_tokens (
   CONSTRAINT fk_user_tokens_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- Einfache Begrenzung von Anmeldeversuchen und E-Mails (Schutz vor Durchprobieren und Spam)
+-- Einladungen: Registrieren geht nur mit Code. max_uses 1 = für eine Person, mehr = Gruppenlink.
+CREATE TABLE IF NOT EXISTS fs_invites (
+  code       CHAR(12)     NOT NULL,
+  created_by CHAR(16)     NOT NULL,
+  note       VARCHAR(100) NOT NULL DEFAULT '',
+  created_at DATETIME     NOT NULL,
+  expires_at DATETIME     NOT NULL,
+  max_uses   INT          NOT NULL DEFAULT 1,
+  uses       INT          NOT NULL DEFAULT 0,
+  PRIMARY KEY (code),
+  KEY idx_invites_creator (created_by)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS fs_invite_uses (
+  code    CHAR(12) NOT NULL,
+  user_id CHAR(16) NOT NULL,
+  used_at DATETIME NOT NULL,
+  PRIMARY KEY (code, user_id),
+  CONSTRAINT fk_invite_uses_user FOREIGN KEY (user_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Freundschaften (status: pending = angefragt, accepted = befreundet)
+CREATE TABLE IF NOT EXISTS fs_friends (
+  requester_id CHAR(16)    NOT NULL,
+  addressee_id CHAR(16)    NOT NULL,
+  status       VARCHAR(10) NOT NULL,
+  created_at   DATETIME    NOT NULL,
+  accepted_at  DATETIME    NULL,
+  PRIMARY KEY (requester_id, addressee_id),
+  KEY idx_friends_addressee (addressee_id),
+  CONSTRAINT fk_friends_requester FOREIGN KEY (requester_id) REFERENCES fs_users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_friends_addressee FOREIGN KEY (addressee_id) REFERENCES fs_users (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Begrenzung von Anmeldeversuchen und E-Mails (Schutz vor Durchprobieren und Spam)
 CREATE TABLE IF NOT EXISTS fs_rate_limits (
   bucket       VARCHAR(120) NOT NULL,
   hits         INT          NOT NULL,
   window_start DATETIME     NOT NULL,
   PRIMARY KEY (bucket)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Schema-Version: Die App prüft sie bei jedem Aufruf und richtet fehlende Tabellen selbst ein.
+CREATE TABLE IF NOT EXISTS fs_meta (
+  k VARCHAR(32)  NOT NULL,
+  v VARCHAR(255) NOT NULL,
+  PRIMARY KEY (k)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

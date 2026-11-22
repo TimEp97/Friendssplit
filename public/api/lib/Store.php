@@ -190,6 +190,43 @@ final class Store
         });
     }
 
+    /**
+     * Holt eine befreundete Person mit ihrem Konto ins Event (die Freundschaft prüft der Aufrufer).
+     * Gibt es schon einen gleichnamigen Platzhalter ohne Konto, wird dieser verknüpft – samt seiner Ausgaben.
+     * @param array<string,mixed> $friend Zeile aus fs_users
+     */
+    public function addAccount(array $event, array $friend, ?string $actor): string
+    {
+        return $this->transaction($event, function () use ($event, $friend, $actor) {
+            if ($this->actor($event, $friend['id']) !== null) {
+                throw new ApiError(409, 'already_member', sprintf('%s ist schon im Event.', $friend['display_name']));
+            }
+            $participants = $this->participants($event['id']);
+            $who = $this->actorName($event, $actor);
+            foreach ($participants as $p) {
+                if (!$p['linked'] && mb_strtolower($p['name']) === mb_strtolower($friend['display_name'])) {
+                    $this->db->prepare('UPDATE fs_persons SET auth_user_id = ? WHERE id = ? AND auth_user_id IS NULL')->execute([$friend['id'], $p['id']]);
+                    $this->log($event['id'], $actor, 'participant_linked', sprintf('%s hat %s mit dem Konto verknüpft', $who, $p['name']));
+                    return $p['id'];
+                }
+            }
+            if (count($participants) >= self::MAX_PARTICIPANTS) {
+                throw new ApiError(422, 'too_many_participants', 'Ein Event kann höchstens ' . self::MAX_PARTICIPANTS . ' Teilnehmende haben.');
+            }
+            // Name schon von jemand anderem belegt → mit Nummer unterscheiden
+            $taken = array_map(fn ($p) => mb_strtolower($p['name']), $participants);
+            $name = $friend['display_name'];
+            for ($n = 2; in_array(mb_strtolower($name), $taken, true); $n++) {
+                $name = mb_substr($friend['display_name'], 0, 55) . " ($n)";
+            }
+            $position = $participants ? max(array_column($participants, 'position')) + 1 : 0;
+            $personId = $this->insertParticipant($event['id'], $name, 'member', $position, Db::now());
+            $this->db->prepare('UPDATE fs_persons SET auth_user_id = ? WHERE id = ?')->execute([$friend['id'], $personId]);
+            $this->log($event['id'], $actor, 'participant_added', sprintf('%s hat %s hinzugefügt', $who, $name));
+            return $personId;
+        });
+    }
+
     /** Löst die Verknüpfung des eigenen Kontos mit der Person (die Person bleibt im Event). */
     public function releasePerson(array $event, string $actor): void
     {
@@ -602,7 +639,7 @@ final class Store
             ],
             'me' => $actor,
             'participants' => array_map(fn ($p) => [
-                'id' => $p['id'], 'name' => $p['name'], 'paypal' => $p['paypal'], 'linked' => $p['linked'], 'role' => $p['role'],
+                'id' => $p['id'], 'name' => $p['name'], 'paypal' => $p['paypal'], 'linked' => $p['linked'], 'user_id' => $p['user_id'], 'role' => $p['role'],
             ], $participants),
             'expenses' => $expenses,
             'settlements' => $settlements,
@@ -676,7 +713,7 @@ final class Store
         ];
     }
 
-    /** @return array<int,array{id:string,name:string,paypal:?string,linked:bool,role:string,position:int}> */
+    /** @return array<int,array{id:string,name:string,paypal:?string,linked:bool,user_id:?string,role:string,position:int}> */
     private function participants(string $eventId): array
     {
         $stmt = $this->db->prepare(
@@ -692,6 +729,7 @@ final class Store
             // Personen mit Konto: PayPal.me-Link aus dem Profil; Platzhalter: im Event hinterlegter Link.
             'paypal' => $r['auth_user_id'] !== null ? $r['user_paypal'] : $r['paypal_me'],
             'linked' => $r['auth_user_id'] !== null,
+            'user_id' => $r['auth_user_id'],
             'role' => $r['role'],
             'position' => (int) $r['position'],
         ], $stmt->fetchAll());

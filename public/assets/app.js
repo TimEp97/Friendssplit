@@ -145,7 +145,7 @@ class ApiError extends Error {
   }
 }
 
-async function api(action, { body = null, code = null } = {}) {
+async function api(action, { body = null, code = null, params = {} } = {}) {
   const headers = { Accept: 'application/json' };
   if (code) headers['X-Event-Code'] = code;
   if (body) {
@@ -154,7 +154,8 @@ async function api(action, { body = null, code = null } = {}) {
   }
   let response;
   try {
-    response = await fetch(`${API_URL}?action=${encodeURIComponent(action)}`, {
+    const query = new URLSearchParams({ action, ...params });
+    response = await fetch(`${API_URL}?${query}`, {
       method: body ? 'POST' : 'GET',
       headers,
       body: body ? JSON.stringify(body) : undefined,
@@ -200,8 +201,16 @@ const S = {
   editingEvent: false,
   afterPick: null,
   user: undefined, // undefined = noch nicht geprüft, null = abgemeldet, sonst Profil vom Server
-  notice: null, // Hinweis nach Registrierung o. Ä.: { email, kind }
-  verifying: null, // Zustand beim Bestätigen per E-Mail-Link
+  setupNeeded: false, // noch kein Konto: erstes Konto mit Einrichtungscode anlegen
+  challenge: null, // Code aus der E-Mail nötig: { pending, purpose, email }
+  inviteInfo: null, // Einladung auf der Registrierungsseite: { code, valid, from, group }
+  resetSent: null, // „Passwort vergessen“ abgeschickt (Eingabe zur Anzeige)
+  verifying: null, // Zustand beim Bestätigen einer neuen E-Mail-Adresse
+  friends: null, // { friends, incoming, outgoing } vom Server
+  invites: null,
+  search: { q: '', results: [] },
+  adminUsers: null,
+  createFriends: new Set(), // im Formular „Neues Event“ ausgewählte Freund:innen
 };
 
 const main = document.getElementById('main');
@@ -249,12 +258,15 @@ function parseRoute() {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'neu') return { name: 'create' };
   if (parts[0] === 'login') return { name: 'login' };
-  if (parts[0] === 'registrieren') return { name: 'register' };
+  if (parts[0] === 'einrichten') return { name: 'setup' };
+  if (parts[0] === 'registrieren') return { name: 'register', invite: parts[1] ?? '' };
+  if (parts[0] === 'code') return { name: 'code' };
   if (parts[0] === 'passwort-vergessen') return { name: 'forgot' };
-  if (parts[0] === 'bestaetigen' && parts[1]) return { name: 'verify', token: parts[1] };
   if (parts[0] === 'passwort-neu' && parts[1]) return { name: 'reset', token: parts[1] };
-  if (parts[0] === 'email-bestaetigen' && parts[1]) return { name: 'verify', token: parts[1], kind: 'email' };
+  if (parts[0] === 'email-bestaetigen' && parts[1]) return { name: 'verify', token: parts[1] };
   if (parts[0] === 'profil') return { name: 'profile' };
+  if (parts[0] === 'freunde') return { name: 'friends' };
+  if (parts[0] === 'admin') return { name: 'admin' };
   if (parts[0] === 'e' && parts[1]) {
     const code = normalizeCode(parts[1]);
     if (parts[2] === 'ausgabe') return { name: 'expense', code, expenseId: parts[3] && parts[3] !== 'neu' ? parts[3] : null };
@@ -267,7 +279,8 @@ function parseRoute() {
 const go = (hash) => { if (location.hash === hash) onRoute(); else location.hash = hash; };
 const eventPath = (sub = 'ausgaben') => `#/e/${S.code}/${sub}`;
 
-const PUBLIC_ROUTES = ['login', 'register', 'forgot', 'verify', 'reset'];
+const PUBLIC_ROUTES = ['login', 'setup', 'register', 'code', 'forgot', 'verify', 'reset'];
+const LOGIN_ROUTES = ['login', 'setup', 'register', 'code', 'forgot'];
 
 async function loadUser() {
   try {
@@ -275,6 +288,43 @@ async function loadUser() {
   } catch (error) {
     S.user = error.code === 'not_authenticated' ? null : undefined;
     if (S.user === undefined) throw error;
+    S.setupNeeded = (await api('status')).setup_needed;
+  }
+}
+
+/** Antwort von Login, Registrierung usw.: entweder angemeldet oder Code aus der E-Mail nötig. */
+function afterAuth(result) {
+  if (result.pending) {
+    S.challenge = result;
+    go('#/code');
+    return;
+  }
+  S.user = result.user;
+  S.challenge = null;
+  S.setupNeeded = false;
+  S.friends = null;
+  go(takeAfterLogin());
+}
+
+/** Lädt Daten, die eine Seite braucht, und zeichnet danach neu. */
+async function loadFor(route) {
+  const jobs = [];
+  // Freunde bei jedem Öffnen frisch laden – Anfragen können inzwischen angenommen worden sein.
+  if (['friends', 'create', 'personen'].includes(route.name)) jobs.push(api('friends').then(applyFriends));
+  if (route.name === 'home') jobs.push(api('me').then((d) => { S.user = d.user; }));
+  if (route.name === 'friends' && !S.invites) jobs.push(api('invites').then((d) => { S.invites = d.invites; }));
+  if (route.name === 'admin') jobs.push(api('admin_users').then((d) => { S.adminUsers = d.users; }));
+  if (route.name === 'register' && route.invite && S.inviteInfo?.code !== route.invite) {
+    jobs.push(api('invite_info', { params: { code: route.invite } }).then((d) => { S.inviteInfo = { code: route.invite, ...d }; }));
+  }
+  if (!jobs.length) return;
+  try {
+    await Promise.all(jobs);
+    if (S.route !== route) return;
+    if (route.name === 'create') renderCreateFriends();
+    else if (!isBusyEditing()) render();
+  } catch (error) {
+    toast(error.message, 'error');
   }
 }
 
@@ -287,16 +337,26 @@ async function onRoute() {
   // Ohne Anmeldung nur Login, Registrierung und E-Mail-Links; angemeldet keine Login-Seiten.
   if (!S.user && !PUBLIC_ROUTES.includes(route.name)) {
     rememberAfterLogin(location.hash);
+    location.replace(S.setupNeeded ? '#/einrichten' : '#/login');
+    return;
+  }
+  if (!S.user && route.name === 'code' && !S.challenge) {
     location.replace('#/login');
     return;
   }
-  if (S.user && ['login', 'register', 'forgot'].includes(route.name)) {
+  if (S.user && LOGIN_ROUTES.includes(route.name)) {
     location.replace(takeAfterLogin());
+    return;
+  }
+  if (route.name === 'admin' && S.user?.role !== 'admin') {
+    location.replace('#/');
     return;
   }
   const previous = S.route;
   S.route = route;
-  if (route.name === 'verify' && previous.token !== route.token) verifyEmail(route.token, route.kind);
+  if (route.name === 'verify' && previous.token !== route.token) verifyEmail(route.token);
+  if (route.name === 'register' && route.invite) rememberAfterLogin(null);
+  loadFor(route);
   if (route.name !== 'expense') S.form = null;
   if (route.name !== 'personen') { S.renaming = null; S.editingEvent = false; }
 
@@ -336,7 +396,8 @@ async function onRoute() {
 function render() {
   const views = {
     home: viewHome, create: viewCreate, wer: viewPicker, ausgaben: viewExpenses, abrechnung: viewSettle, personen: viewPeople, expense: viewExpenseForm,
-    login: viewLogin, register: viewRegister, forgot: viewForgot, verify: viewVerify, reset: viewReset, profile: viewProfile,
+    login: viewLogin, setup: viewSetup, register: viewRegister, code: viewCode, forgot: viewForgot, verify: viewVerify, reset: viewReset,
+    profile: viewProfile, friends: viewFriends, admin: viewAdmin,
   };
   let content;
   if (S.route.code && !S.data) content = S.loadError ? viewLoadError() : viewLoading();
@@ -344,7 +405,7 @@ function render() {
   main.innerHTML = String(content);
   renderTabbar();
   if (S.route.name === 'expense' && S.data) updateSplitPreview();
-  if (S.route.name === 'create') renderCreatePeople();
+  if (S.route.name === 'create') { renderCreatePeople(); renderCreateFriends(); }
 }
 
 function renderTabbar() {
@@ -417,6 +478,7 @@ function viewHome() {
   const events = S.user.events;
   return html`
     <div class="topbar">
+      <a class="chip" href="#/freunde">${icon('people')}<span>Freunde</span>${S.user.friend_requests ? html`<span class="count" aria-label="${S.user.friend_requests} offene Anfragen">${S.user.friend_requests}</span>` : ''}</a>
       <a class="chip chip--me" href="#/profil">${icon('user')}<span>${S.user.name}</span></a>
     </div>
     <section class="hero">
@@ -486,15 +548,30 @@ function viewCreate() {
           <input id="f-person" maxlength="60" placeholder="Name eingeben, z. B. Alex" aria-describedby="hint-person err-participants" enterkeyhint="enter">
           <button class="btn" type="button" data-action="create-add-person">${icon('plus')} Hinzufügen</button>
         </div>
-        <p class="hint" id="hint-person">Du (${S.user.name}) bist automatisch dabei. Mit Enter hinzufügen. Die anderen wählen ihren Namen, wenn sie den Link öffnen und sich anmelden.</p>
+        <p class="hint" id="hint-person">Du (${S.user.name}) bist automatisch dabei. Mit Enter hinzufügen. Für Leute ohne Konto – sie wählen ihren Namen, wenn sie den Link öffnen.</p>
         <p class="field-error" id="err-participants"></p>
         <ul class="chips" id="people-chips" aria-label="Hinzugefügte Teilnehmende"></ul>
       </div>
+      <div id="create-friends"></div>
       <div class="form-actions">
         <a class="btn" href="#/">Abbrechen</a>
         <button class="btn btn--primary" type="submit">Event erstellen</button>
       </div>
     </form>`;
+}
+
+/** Freundesauswahl im Formular „Neues Event“ – eigener Bereich, damit Eingaben beim Nachladen erhalten bleiben. */
+function renderCreateFriends() {
+  const box = document.getElementById('create-friends');
+  if (!box) return;
+  const friends = S.friends?.friends ?? [];
+  box.innerHTML = String(friends.length ? html`
+    <fieldset class="field">
+      <legend>Freunde direkt dazuholen</legend>
+      <div class="chips chips--select">${friends.map((f) => html`
+        <label class="chip chip--check"><input type="checkbox" name="friends" value="${f.id}" ${S.createFriends.has(f.id) ? raw('checked') : ''}><span>${f.name}</span></label>`)}</div>
+      <p class="hint">Das Event erscheint sofort bei ihnen – ohne Link. Steht der Name schon oben, wird er mit dem Konto verknüpft.</p>
+    </fieldset>` : '');
 }
 
 function renderCreatePeople() {
@@ -555,29 +632,26 @@ const authHead = (title, lead) => html`
     ${lead ? html`<p class="lead">${lead}</p>` : ''}
   </section>`;
 
-/** Hinweis „Schau in dein Postfach“ nach Registrierung bzw. bei unbestätigter Adresse. */
-function mailNotice() {
-  const n = S.notice;
-  if (!n) return '';
-  return html`
-    <div class="card notice" role="status">
-      <h2>📬 Schau in dein Postfach</h2>
-      <p>${n.kind === 'unverified'
-        ? html`Deine E-Mail-Adresse <strong>${n.email}</strong> ist noch nicht bestätigt. Klicke auf den Link in unserer E-Mail.`
-        : html`Wir haben eine E-Mail an <strong>${n.email}</strong> geschickt. Klicke auf den Link darin, um dein Konto zu bestätigen – danach bist du direkt angemeldet.`}</p>
-      <p class="muted small">Nichts angekommen? Prüfe den Spam-Ordner oder lass dir den Link noch einmal schicken.</p>
-      <button class="btn btn--small" data-action="resend-verification" data-email="${n.email}">Bestätigungslink erneut senden</button>
-    </div>`;
-}
+const passwordField = (id, label, autocomplete, hint = 'Mindestens 10 Zeichen.') => html`
+  <div class="field"><label for="${id}">${label}</label>
+    <input id="${id}" name="password" type="password" autocomplete="${autocomplete}" minlength="10" aria-describedby="hint-${id} err-password">
+    ${hint ? html`<p class="hint" id="hint-${id}">${hint}</p>` : ''}<p class="field-error" id="err-password"></p></div>`;
+
+const nameEmailFields = () => html`
+  <div class="field"><label for="f-name">Dein Name</label>
+    <input id="f-name" name="name" maxlength="24" autocomplete="nickname" placeholder="z. B. Tim Müller" aria-describedby="hint-name err-name">
+    <p class="hint" id="hint-name">So finden dich deine Freunde. 3–24 Zeichen.</p><p class="field-error" id="err-name"></p></div>
+  <div class="field"><label for="f-email">E-Mail-Adresse</label>
+    <input id="f-email" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="hint-email err-email">
+    <p class="hint" id="hint-email">Nur für Codes und „Passwort vergessen“. Deine Freunde sehen sie nicht.</p><p class="field-error" id="err-email"></p></div>`;
 
 function viewLogin() {
   return html`
-    ${authHead('Anmelden', 'Teilt Ausgaben mit euren Freund:innen – alle Events an einem Ort, auf jedem Gerät.')}
-    ${mailNotice()}
+    ${authHead('Anmelden', 'Teilt Ausgaben mit euren Freunden – alle Events an einem Ort, auf jedem Gerät.')}
     <form id="login-form" class="form card" novalidate>
-      <div class="form-error" id="form-error" role="alert" hidden></div>
-      <div class="field"><label for="f-email">E-Mail-Adresse</label>
-        <input id="f-email" name="email" type="email" autocomplete="username" inputmode="email" autocapitalize="off" spellcheck="false" value="${S.notice?.email ?? ''}" aria-describedby="err-email"><p class="field-error" id="err-email"></p></div>
+      <div class="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-login">Name oder E-Mail-Adresse</label>
+        <input id="f-login" name="login" autocomplete="username" autocapitalize="off" spellcheck="false" aria-describedby="err-login"><p class="field-error" id="err-login"></p></div>
       <div class="field"><label for="f-password">Passwort</label>
         <input id="f-password" name="password" type="password" autocomplete="current-password" aria-describedby="err-password"><p class="field-error" id="err-password"></p></div>
       <div class="form-actions form-actions--split">
@@ -585,56 +659,89 @@ function viewLogin() {
         <button class="btn btn--primary" type="submit">Anmelden</button>
       </div>
     </form>
-    <p class="center">Noch kein Konto? <a href="#/registrieren">Jetzt registrieren</a></p>`;
+    <p class="center muted small">Neu hier? FriendSplit ist nur mit Einladung. Den Link bekommst du von jemandem, der schon dabei ist.<br>
+      <a href="#/registrieren">Ich habe einen Einladungscode</a></p>`;
+}
+
+function viewSetup() {
+  return html`
+    ${authHead('FriendSplit einrichten', 'Es gibt noch kein Konto. Lege das erste Konto an – es bekommt Admin-Rechte und kann Freunde einladen.')}
+    <form id="setup-form" class="form card" novalidate>
+      <div class="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-setup-code">Einrichtungscode</label>
+        <input id="f-setup-code" name="code" type="password" autocomplete="off" aria-describedby="hint-setup-code err-code">
+        <p class="hint" id="hint-setup-code">Das GitHub-Secret SETUP_CODE – oder, falls nicht gesetzt, das Datenbank-Passwort.</p><p class="field-error" id="err-code"></p></div>
+      ${nameEmailFields()}
+      ${passwordField('f-password', 'Passwort', 'new-password')}
+      <div class="form-actions"><button class="btn btn--primary" type="submit">Konto anlegen</button></div>
+    </form>
+    <p class="center"><a href="#/login">Es gibt schon ein Konto? Anmelden</a></p>`;
 }
 
 function viewRegister() {
-  if (S.notice?.kind === 'registered') {
-    return html`${authHead('Fast geschafft!')}${mailNotice()}<p class="center"><a href="#/login">Zur Anmeldung</a></p>`;
-  }
+  const invite = S.route.invite ? formatCode(normalizeCode(S.route.invite)) : '';
+  const info = S.inviteInfo?.code === S.route.invite ? S.inviteInfo : null;
   return html`
-    ${authHead('Konto erstellen', 'Mit deinem Konto siehst du alle deine Events und musst deinen PayPal.me-Link nur einmal hinterlegen.')}
+    ${authHead('Konto erstellen', 'Mit deinem Konto siehst du alle deine Events auf jedem Gerät und kannst Freunde direkt dazuholen.')}
+    ${info?.valid ? html`<div class="banner banner--pos" role="status"><span><strong>${info.from}</strong> ${info.group ? 'lädt eure Gruppe' : 'lädt dich'} zu FriendSplit ein. Danach könnt ihr euch als Freunde verbinden.</span></div>` : ''}
+    ${info && !info.valid ? html`<div class="banner banner--warn" role="status"><span>Diese Einladung ist schon benutzt, voll oder abgelaufen. Bitte um einen neuen Link.</span></div>` : ''}
     <form id="register-form" class="form card" novalidate>
-      <div class="form-error" id="form-error" role="alert" hidden></div>
-      <div class="field"><label for="f-name">Dein Name</label>
-        <input id="f-name" name="name" maxlength="60" autocomplete="given-name" placeholder="z. B. Alex" aria-describedby="hint-name err-name">
-        <p class="hint" id="hint-name">So erscheinst du in neuen Events.</p><p class="field-error" id="err-name"></p></div>
-      <div class="field"><label for="f-email">E-Mail-Adresse</label>
-        <input id="f-email" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="err-email"><p class="field-error" id="err-email"></p></div>
-      <div class="field"><label for="f-password">Passwort</label>
-        <input id="f-password" name="password" type="password" autocomplete="new-password" minlength="8" aria-describedby="hint-password err-password">
-        <p class="hint" id="hint-password">Mindestens 8 Zeichen.</p><p class="field-error" id="err-password"></p></div>
+      <div class="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-invite">Einladungscode</label>
+        <input id="f-invite" name="invite" value="${invite}" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="z. B. ABCD-EFGH-JKLM" aria-describedby="err-invite"><p class="field-error" id="err-invite"></p></div>
+      ${nameEmailFields()}
+      ${passwordField('f-password', 'Passwort', 'new-password')}
       <div class="form-actions"><button class="btn btn--primary" type="submit">Registrieren</button></div>
     </form>
     <p class="center">Schon registriert? <a href="#/login">Anmelden</a></p>`;
 }
 
+function viewCode() {
+  const c = S.challenge;
+  return html`
+    ${authHead(c.purpose === 'verify' ? 'E-Mail bestätigen' : 'Neues Gerät bestätigen',
+      c.purpose === 'verify'
+        ? `Wir haben dir einen 6-stelligen Code an ${c.email} geschickt. Damit bestätigst du deine E-Mail-Adresse und bist angemeldet.`
+        : `Du meldest dich auf einem neuen Gerät an. Zur Sicherheit haben wir dir einen 6-stelligen Code an ${c.email} geschickt. Dieses Gerät merken wir uns danach 90 Tage.`)}
+    <form id="code-form" class="form card" novalidate>
+      <div class="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-code">Code aus der E-Mail</label>
+        <input id="f-code" name="code" class="input-code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="123456" aria-describedby="hint-code err-code">
+        <p class="hint" id="hint-code">Gilt 15 Minuten. Schau auch im Spam-Ordner nach.</p><p class="field-error" id="err-code"></p></div>
+      <div class="form-actions form-actions--split">
+        <button class="btn btn--ghost" type="button" data-action="resend-code">Code erneut senden</button>
+        <button class="btn btn--primary" type="submit">Bestätigen</button>
+      </div>
+    </form>
+    <p class="center"><a href="#/login" data-action="cancel-code">Abbrechen</a></p>`;
+}
+
 function viewForgot() {
-  if (S.notice?.kind === 'reset') {
+  if (S.resetSent) {
     return html`${authHead('E-Mail ist unterwegs')}
-      <div class="card notice" role="status"><p>Falls es ein Konto zu <strong>${S.notice.email}</strong> gibt, haben wir dir einen Link geschickt. Er ist 60 Minuten gültig.</p></div>
+      <div class="card notice" role="status"><p>Falls es ein Konto zu <strong>${S.resetSent}</strong> gibt, haben wir dir einen Link an die hinterlegte E-Mail-Adresse geschickt. Er ist 60 Minuten gültig.</p>
+        <p class="muted small">Nichts angekommen? Der Admin kann dir auch direkt einen Link geben.</p></div>
       <p class="center"><a href="#/login">Zur Anmeldung</a></p>`;
   }
   return html`
-    ${authHead('Passwort vergessen', 'Gib deine E-Mail-Adresse ein. Wir schicken dir einen Link, mit dem du ein neues Passwort festlegst.')}
+    ${authHead('Passwort vergessen', 'Gib deinen Namen oder deine E-Mail-Adresse ein. Wir schicken dir einen Link, mit dem du ein neues Passwort festlegst.')}
     <form id="forgot-form" class="form card" novalidate>
-      <div class="form-error" id="form-error" role="alert" hidden></div>
-      <div class="field"><label for="f-email">E-Mail-Adresse</label>
-        <input id="f-email" name="email" type="email" autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" aria-describedby="err-email"><p class="field-error" id="err-email"></p></div>
+      <div class="form-error" role="alert" hidden></div>
+      <div class="field"><label for="f-login">Name oder E-Mail-Adresse</label>
+        <input id="f-login" name="login" autocomplete="username" autocapitalize="off" spellcheck="false" aria-describedby="err-login"><p class="field-error" id="err-login"></p></div>
       <div class="form-actions form-actions--split"><a href="#/login">Zurück</a><button class="btn btn--primary" type="submit">Link senden</button></div>
     </form>`;
 }
 
-async function verifyEmail(token, kind) {
+/** Link aus der E-Mail „neue Adresse bestätigen“ */
+async function verifyEmail(token) {
   S.verifying = { state: 'busy' };
   try {
-    const result = await api(kind === 'email' ? 'confirm_email_change' : 'verify_email', { body: { token } });
+    const result = await api('confirm_email_change', { body: { token } });
     S.user = result.user;
-    S.notice = null;
     S.verifying = null;
-    if (kind === 'email') { toast(`Deine E-Mail-Adresse ist jetzt ${result.user.email}.`); go('#/profil'); return; }
-    toast('E-Mail bestätigt – willkommen bei FriendSplit!');
-    go(takeAfterLogin());
+    toast(`Deine E-Mail-Adresse ist jetzt ${result.user.email}.`);
+    go('#/profil');
   } catch (error) {
     S.verifying = { state: 'error', message: error.message };
     if (S.route.name === 'verify') render();
@@ -650,7 +757,7 @@ function viewVerify() {
       <div class="empty__icon" aria-hidden="true">⌛</div>
       <h1 tabindex="-1">Link funktioniert nicht</h1>
       <p>${S.verifying.message}</p>
-      <div class="row row--center"><a class="btn btn--primary" href="${S.user ? '#/' : '#/login'}">${S.user ? 'Zur Startseite' : 'Zur Anmeldung'}</a></div>
+      <div class="row row--center"><a class="btn btn--primary" href="${S.user ? '#/profil' : '#/login'}">${S.user ? 'Zum Profil' : 'Zur Anmeldung'}</a></div>
     </section>`;
 }
 
@@ -658,10 +765,8 @@ function viewReset() {
   return html`
     ${authHead('Neues Passwort', 'Lege ein neues Passwort fest. Danach bist du angemeldet und auf allen anderen Geräten abgemeldet.')}
     <form id="reset-form" class="form card" novalidate>
-      <div class="form-error" id="form-error" role="alert" hidden></div>
-      <div class="field"><label for="f-password">Neues Passwort</label>
-        <input id="f-password" name="password" type="password" autocomplete="new-password" minlength="8" aria-describedby="hint-password err-password">
-        <p class="hint" id="hint-password">Mindestens 8 Zeichen.</p><p class="field-error" id="err-password"></p></div>
+      <div class="form-error" role="alert" hidden></div>
+      ${passwordField('f-password', 'Neues Passwort', 'new-password', 'Mindestens 10 Zeichen.')}
       <div class="form-actions"><button class="btn btn--primary" type="submit">Passwort speichern</button></div>
     </form>`;
 }
@@ -677,12 +782,17 @@ function viewProfile() {
       <div class="profile-head">${avatar(u.id, u.name)}<div><p class="card__title">${u.name}</p><p class="muted small">${u.email}</p></div></div>
     </section>
 
+    <nav class="card profile-links" aria-label="Konto">
+      <a class="profile-link" href="#/freunde">${icon('people')}<span>Freunde und Einladungen</span>${u.friend_requests ? html`<span class="count">${u.friend_requests}</span>` : ''}</a>
+      ${u.role === 'admin' ? html`<a class="profile-link" href="#/admin">${icon('user')}<span>Nutzer verwalten (Admin)</span></a>` : ''}
+    </nav>
+
     <section class="card section" aria-labelledby="name-heading">
       <h2 id="name-heading">Name</h2>
       <form id="name-form" class="inline-form" novalidate>
         <div class="field field--grow"><label for="f-name">Dein Name</label>
-          <input id="f-name" name="name" maxlength="60" value="${u.name}" autocomplete="given-name" aria-describedby="hint-name err-name">
-          <p class="hint" id="hint-name">Gilt für neue Events. In bestehenden Events kannst du deinen Namen unter „Teilnehmende“ ändern.</p>
+          <input id="f-name" name="name" maxlength="24" value="${u.name}" autocomplete="nickname" aria-describedby="hint-name err-name">
+          <p class="hint" id="hint-name">So finden dich deine Freunde, und so heißt du in neuen Events. In bestehenden Events änderst du deinen Namen unter „Teilnehmende“.</p>
           <p class="field-error" id="err-name"></p></div>
         <button class="btn btn--primary" type="submit">Speichern</button>
       </form>
@@ -732,8 +842,8 @@ function viewProfile() {
             <input id="f-cur-pw" name="current_password" type="password" autocomplete="current-password" aria-describedby="err-cur-pw">
             <p class="field-error" id="err-cur-pw"></p></div>
           <div class="field"><label for="f-new-pw">Neues Passwort</label>
-            <input id="f-new-pw" name="new_password" type="password" autocomplete="new-password" minlength="8" aria-describedby="hint-new-pw err-new_password">
-            <p class="hint" id="hint-new-pw">Mindestens 8 Zeichen. Andere Geräte werden danach abgemeldet.</p>
+            <input id="f-new-pw" name="new_password" type="password" autocomplete="new-password" minlength="10" aria-describedby="hint-new-pw err-new_password">
+            <p class="hint" id="hint-new-pw">Mindestens 10 Zeichen. Andere Geräte werden danach abgemeldet.</p>
             <p class="field-error" id="err-new_password"></p></div>
           <div class="form-actions"><button class="btn btn--primary" type="submit">Passwort ändern</button></div>
         </form>
@@ -754,6 +864,121 @@ function viewProfile() {
     </section>
 
     <button class="btn btn--ghost btn--danger-ghost" data-action="logout">Abmelden</button>`;
+}
+
+// ---------- Freunde und Einladungen
+
+function viewFriends() {
+  const f = S.friends;
+  const back = html`<header class="form-head"><a class="btn-icon" href="#/" aria-label="Zurück">${icon('back')}</a><h1 tabindex="-1">Freunde</h1></header>`;
+  if (!f) return html`${back}<div class="state-msg" role="status"><span class="spinner" aria-hidden="true"></span> Freunde werden geladen …</div>`;
+  const statusLabel = { friend: '✓ Freunde', outgoing: 'Angefragt', incoming: 'Fragt dich an' };
+  return html`
+    ${back}
+    ${f.incoming.length ? html`
+    <section class="section" aria-labelledby="req-heading">
+      <h2 id="req-heading">Freundschaftsanfragen</h2>
+      <ul class="list">${f.incoming.map((p) => html`
+        <li class="card person-row">${avatar(p.id, p.name)}<span class="person-row__name">${p.name}</span>
+          <button class="btn btn--small btn--primary" data-action="friend-accept" data-id="${p.id}">Annehmen</button>
+          <button class="btn btn--small btn--ghost" data-action="friend-remove" data-id="${p.id}" data-kind="decline">Ablehnen</button></li>`)}</ul>
+    </section>` : ''}
+
+    <section class="section" aria-labelledby="friends-heading">
+      <h2 id="friends-heading">Deine Freunde (${f.friends.length})</h2>
+      ${f.friends.length === 0 ? html`<p class="muted">Noch keine Freunde. Lade jemanden ein oder suche unten nach Namen.</p>` : html`
+      <ul class="list">${f.friends.map((p) => html`
+        <li class="card person-row">${avatar(p.id, p.name)}<span class="person-row__name">${p.name}${p.paypal ? html` <span class="paypal-chip paypal-chip--set">✓ PayPal</span>` : ''}</span>
+          <button class="btn-icon btn-icon--danger" data-action="friend-remove" data-id="${p.id}" data-name="${p.name}" data-kind="remove" aria-label="Freundschaft mit ${p.name} beenden" title="Entfernen">${icon('trash')}</button></li>`)}</ul>`}
+      ${f.outgoing.length ? html`<p class="muted small">Angefragt: ${f.outgoing.map((p, i) => html`${i ? ', ' : ''}${p.name} <button class="linkish" data-action="friend-remove" data-id="${p.id}" data-kind="cancel">zurückziehen</button>`)}</p>` : ''}
+    </section>
+
+    <section class="card section" aria-labelledby="search-heading">
+      <h2 id="search-heading">Freunde finden</h2>
+      <div class="field"><label for="f-search">Name suchen</label>
+        <input id="f-search" type="search" value="${S.search.q}" autocomplete="off" placeholder="mind. 2 Buchstaben" aria-describedby="search-results"></div>
+      <ul class="list" id="search-results" aria-live="polite">${searchResults(statusLabel)}</ul>
+    </section>
+
+    <section class="card section" aria-labelledby="invite-heading">
+      <h2 id="invite-heading">Freunde einladen</h2>
+      <p class="muted small">FriendSplit ist nur mit Einladung. Wer sich mit deinem Link registriert, bekommt automatisch eine Freundschaftsanfrage von dir. Links gelten 14 Tage.</p>
+      <form id="invite-form" class="inline-form" novalidate>
+        <div class="field field--grow"><label for="f-invite-note">Für wen? <span class="opt">(optional)</span></label>
+          <input id="f-invite-note" name="note" maxlength="100" placeholder="z. B. Sam oder WG"></div>
+        <label class="check"><input type="checkbox" name="group"> Gruppenlink (bis 30 Personen)</label>
+        <button class="btn btn--primary" type="submit">${icon('plus')} Link erstellen</button>
+      </form>
+      ${S.invites?.length ? html`<ul class="list invites">${S.invites.map((i) => html`
+        <li class="invite ${i.open ? '' : 'invite--used'}">
+          <div><strong>${i.note || (i.group ? 'Gruppenlink' : 'Einladung')}</strong> <code>${i.code}</code>
+            <p class="muted small">${i.open ? `${i.group ? `${i.uses} von ${i.max_uses} genutzt · ` : ''}gültig bis ${formatDate(i.expires_at.slice(0, 10))}` : 'verbraucht oder abgelaufen'}${i.members.length ? ` · ${joinNames(i.members)}` : ''}</p></div>
+          <div class="row">
+            ${i.open ? html`<button class="btn btn--small" data-action="invite-share" data-link="${i.link}">${icon('share')} Teilen</button>` : ''}
+            <button class="btn-icon btn-icon--danger" data-action="invite-delete" data-code="${i.code}" aria-label="Einladung ${i.code} löschen" title="Löschen">${icon('trash')}</button>
+          </div></li>`)}</ul>` : ''}
+    </section>`;
+}
+
+function searchResults(statusLabel = { friend: '✓ Freunde', outgoing: 'Angefragt', incoming: 'Fragt dich an' }) {
+  const { q, results } = S.search;
+  if (q.trim().length < 2) return '';
+  if (!results.length) return html`<li class="muted small">Niemand gefunden. Ist die Person schon registriert? Sonst lade sie ein.</li>`;
+  return html`${results.map((r) => html`
+    <li class="person-row">${avatar(r.id, r.name)}<span class="person-row__name">${r.name}</span>
+      ${r.status === 'none' ? html`<button class="btn btn--small btn--primary" data-action="friend-request" data-id="${r.id}">Anfragen</button>`
+        : r.status === 'incoming' ? html`<button class="btn btn--small btn--primary" data-action="friend-accept" data-id="${r.id}">Annehmen</button>`
+        : html`<span class="muted small">${statusLabel[r.status]}</span>`}</li>`)}`;
+}
+
+let searchTimer = null;
+function onSearchInput(value) {
+  S.search.q = value;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => {
+    if (value.trim().length < 2) { S.search.results = []; updateSearch(); return; }
+    try {
+      const { results } = await api('search', { params: { q: value.trim() } });
+      if (S.search.q === value) { S.search.results = results; updateSearch(); }
+    } catch (error) { toast(error.message, 'error'); }
+  }, 250);
+}
+function updateSearch() {
+  const list = document.getElementById('search-results');
+  if (list) list.innerHTML = String(searchResults());
+}
+
+/** Freunde-Antwort vom Server übernehmen (Anfragen-Zähler im Profil mitziehen). */
+function applyFriends(data) {
+  S.friends = data;
+  if (S.user) S.user.friend_requests = data.incoming.length;
+  const status = {};
+  data.friends.forEach((p) => { status[p.id] = 'friend'; });
+  data.incoming.forEach((p) => { status[p.id] = 'incoming'; });
+  data.outgoing.forEach((p) => { status[p.id] = 'outgoing'; });
+  S.search.results = S.search.results.map((r) => ({ ...r, status: status[r.id] ?? 'none' }));
+}
+
+// ---------- Admin
+
+function viewAdmin() {
+  const users = S.adminUsers;
+  const head = html`<header class="form-head"><a class="btn-icon" href="#/profil" aria-label="Zurück">${icon('back')}</a><h1 tabindex="-1">Nutzer verwalten</h1></header>`;
+  if (!users) return html`${head}<div class="state-msg" role="status"><span class="spinner" aria-hidden="true"></span> Wird geladen …</div>`;
+  return html`
+    ${head}
+    <p class="muted small">${plural(users.length, 'Konto', 'Konten')}. Kommen E-Mails nicht an, erzeuge einen Passwort-Link (24 Stunden gültig) und gib ihn direkt weiter.</p>
+    <ul class="list">${users.map((u) => html`
+      <li class="card admin-user ${u.blocked ? 'admin-user--blocked' : ''}">
+        <div class="admin-user__head">${avatar(u.id, u.name)}
+          <div><strong>${u.name}</strong>${u.role === 'admin' ? html` <span class="badge badge--soft">Admin</span>` : ''}${u.blocked ? html` <span class="badge badge--danger">gesperrt</span>` : ''}${u.verified ? '' : html` <span class="badge badge--muted">unbestätigt</span>`}
+            <p class="muted small">${u.email}</p></div></div>
+        <p class="small muted">Seit ${formatDate(u.created_at.slice(0, 10))}${u.invited_by ? ` · eingeladen von ${u.invited_by}` : ''} · zuletzt angemeldet ${u.last_login_at ? relativeTime(u.last_login_at) : 'nie'} · ${plural(u.events, 'Event', 'Events')} · ${plural(u.friends, 'Freund', 'Freunde')}</p>
+        ${u.id === S.user.id ? '' : html`<div class="row">
+          <button class="btn btn--small" data-action="admin-reset-link" data-id="${u.id}" data-name="${u.name}">Passwort-Link</button>
+          <button class="btn btn--small" data-action="admin-block" data-id="${u.id}" data-name="${u.name}" data-blocked="${u.blocked ? '' : '1'}">${u.blocked ? 'Entsperren' : 'Sperren'}</button>
+          <button class="btn btn--small btn--ghost btn--danger-ghost" data-action="admin-delete" data-id="${u.id}" data-name="${u.name}">Löschen</button></div>`}
+      </li>`)}</ul>`;
 }
 
 /** Nach dem Beitreten zurück dorthin, wo man hinwollte. */
@@ -1164,9 +1389,19 @@ function viewPeople() {
             <button class="btn-icon" data-action="rename" data-id="${p.id}" aria-label="${p.name} umbenennen" title="Umbenennen">${icon('edit')}</button>
             <button class="btn-icon btn-icon--danger" data-action="remove-person" data-id="${p.id}" aria-label="${p.name} entfernen" title="Entfernen">${icon('trash')}</button>
           </li>`)}</ul>
+      ${(() => {
+        const inEvent = new Set(participants.map((p) => p.user_id).filter(Boolean));
+        const addable = (S.friends?.friends ?? []).filter((f) => !inEvent.has(f.id));
+        return addable.length ? html`
+        <div class="add-friends">
+          <h3>Freunde dazuholen</h3>
+          <div class="chips">${addable.map((f) => html`
+            <button class="chip" data-action="add-friend" data-id="${f.id}" data-name="${f.name}">${icon('plus')} ${f.name}</button>`)}</div>
+        </div>` : '';
+      })()}
       <form id="add-person-form" class="inline-form add-person" novalidate>
         <div class="field field--grow">
-          <label for="f-new-person">Person hinzufügen</label>
+          <label for="f-new-person">Person ohne Konto hinzufügen</label>
           <input id="f-new-person" name="name" maxlength="60" placeholder="Name" aria-describedby="err-new-name">
           <p class="field-error" id="err-new-name"></p>
         </div>
@@ -1353,18 +1588,64 @@ const actions = {
   logout: async (el) => {
     setBusy(el, true, 'Abmelden …');
     try { await api('logout', { body: {} }); } catch { /* trotzdem lokal abmelden */ }
-    S.user = null;
-    S.data = null; S.code = null; S.dataJson = '';
+    Object.assign(S, { user: null, data: null, code: null, dataJson: '', friends: null, invites: null, adminUsers: null, search: { q: '', results: [] } });
     go('#/login');
     toast('Du bist abgemeldet.');
   },
-  'resend-verification': async (el) => {
+  'resend-code': async (el) => {
     setBusy(el, true, 'Sendet …');
     try {
-      const result = await api('resend_verification', { body: { email: el.dataset.email } });
-      toast(result.message);
+      toast((await api('resend_code', { body: { pending: S.challenge.pending } })).message);
     } catch (error) { toast(error.message, 'error'); }
     setBusy(el, false);
+  },
+  'cancel-code': () => { S.challenge = null; go('#/login'); },
+  'friend-request': (el) => friendAction('friend_request', el, 'Anfrage geschickt'),
+  'friend-accept': (el) => friendAction('friend_accept', el, 'Ihr seid jetzt Freunde'),
+  'friend-remove': async (el) => {
+    const { kind, name } = el.dataset;
+    if (kind === 'remove' && !await confirmDialog({ title: `${name} entfernen?`, text: `Ihr seid danach keine Freunde mehr. Gemeinsame Events bleiben bestehen.`, confirm: 'Entfernen', danger: true })) return;
+    friendAction('friend_remove', el, { remove: 'Freundschaft beendet', decline: 'Anfrage abgelehnt', cancel: 'Anfrage zurückgezogen' }[kind]);
+  },
+  'invite-share': async (el) => {
+    const url = el.dataset.link;
+    if (navigator.share) {
+      try { await navigator.share({ title: 'FriendSplit', text: `${S.user.name} lädt dich zu FriendSplit ein – damit teilen wir unsere Ausgaben:`, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
+    }
+    copyText(url, 'Einladungslink kopiert');
+  },
+  'invite-delete': async (el) => {
+    try {
+      S.invites = (await api('invite_delete', { body: { code: el.dataset.code } })).invites;
+      render();
+      toast('Einladung gelöscht');
+    } catch (error) { toast(error.message, 'error'); }
+  },
+  'add-friend': async (el) => {
+    await mutate('add_friends', { friends: [el.dataset.id] }, { success: `${el.dataset.name} ist jetzt dabei`, button: el });
+  },
+  'admin-reset-link': async (el) => {
+    try {
+      const { link } = await api('admin_reset_link', { body: { id: el.dataset.id } });
+      await copyText(link, `Passwort-Link für ${el.dataset.name} kopiert (24 Stunden gültig)`);
+    } catch (error) { toast(error.message, 'error'); }
+  },
+  'admin-block': async (el) => {
+    const block = el.dataset.blocked === '1';
+    if (block && !await confirmDialog({ title: `${el.dataset.name} sperren?`, text: 'Die Person wird abgemeldet und kann sich nicht mehr anmelden, bis du sie entsperrst.', confirm: 'Sperren', danger: true })) return;
+    try {
+      S.adminUsers = (await api('admin_block', { body: { id: el.dataset.id, blocked: block } })).users;
+      render();
+      toast(block ? `${el.dataset.name} ist gesperrt` : `${el.dataset.name} ist entsperrt`);
+    } catch (error) { toast(error.message, 'error'); }
+  },
+  'admin-delete': async (el) => {
+    if (!await confirmDialog({ title: `Konto von ${el.dataset.name} löschen?`, text: 'Konto, E-Mail-Adresse und Freundschaften werden endgültig gelöscht. In Events bleibt die Person als Name ohne Konto stehen.', confirm: 'Endgültig löschen', danger: true })) return;
+    try {
+      S.adminUsers = (await api('admin_delete', { body: { id: el.dataset.id } })).users;
+      render();
+      toast(`Konto von ${el.dataset.name} gelöscht`);
+    } catch (error) { toast(error.message, 'error'); }
   },
   'reset-filters': () => { S.filters = { person: '', category: '' }; render(); },
   'toggle-all': () => {
@@ -1426,6 +1707,18 @@ const actions = {
   'copy-code': () => copyText(formatCode(S.data.event.code), 'Code kopiert'),
 };
 
+async function friendAction(action, el, success) {
+  setBusy(el, true, '…');
+  try {
+    applyFriends(await api(action, { body: { id: el.dataset.id } }));
+    render();
+    toast(success);
+  } catch (error) {
+    setBusy(el, false);
+    toast(error.message, 'error');
+  }
+}
+
 function addCreatePerson() {
   const input = document.getElementById('f-person');
   const err = document.getElementById('err-participants');
@@ -1445,59 +1738,76 @@ function addCreatePerson() {
 
 // ---------------------------------------------------------------- Formulare
 
-const forms = {
-  'login-form': async (form) => {
-    clearErrors(form);
-    const data = Object.fromEntries(new FormData(form));
-    const errors = {};
-    if (!data.email.trim()) errors.email = 'Bitte gib deine E-Mail-Adresse ein.';
-    if (!data.password) errors.password = 'Bitte gib dein Passwort ein.';
-    if (Object.keys(errors).length) return showFieldErrors(form, errors);
-    const button = form.querySelector('[type="submit"]');
-    setBusy(button, true, 'Anmelden …');
-    try {
-      S.user = (await api('login', { body: data })).user;
-      S.notice = null;
-      go(takeAfterLogin());
-    } catch (error) {
-      setBusy(button, false);
-      if (error.code === 'email_not_verified') { S.notice = { email: data.email.trim(), kind: 'unverified' }; render(); return; }
-      if (error.fields) showFieldErrors(form, error.fields);
-      else showFormError(form, error.message, []);
-      form.elements.password.value = '';
-    }
-  },
+/** Prüfungen für Name, E-Mail und Passwort beim Anlegen eines Kontos (wie auf dem Server). */
+function accountChecks(d) {
+  return {
+    name: !/^[\p{L}\p{N}][\p{L}\p{N} ._-]{1,22}[\p{L}\p{N}]$/u.test(d.name.trim().replace(/\s+/g, ' ')) && '3–24 Zeichen: Buchstaben, Ziffern, Leerzeichen, Punkt oder Bindestrich.',
+    email: !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email.trim()) && 'Bitte gib eine gültige E-Mail-Adresse ein.',
+    password: d.password.length < 10 && 'Das Passwort muss mindestens 10 Zeichen lang sein.',
+  };
+}
 
-  'register-form': async (form) => {
+/** Gemeinsamer Ablauf für Anmelden, Einrichten und Registrieren. */
+async function authForm(form, action, check, busyLabel) {
+  clearErrors(form);
+  const data = Object.fromEntries(new FormData(form));
+  const errors = Object.fromEntries(Object.entries(check(data)).filter(([, v]) => v));
+  if (Object.keys(errors).length) return showFieldErrors(form, errors);
+  const button = form.querySelector('[type="submit"]');
+  setBusy(button, true, busyLabel);
+  try {
+    afterAuth(await api(action, { body: data }));
+  } catch (error) {
+    setBusy(button, false);
+    if (error.fields) showFieldErrors(form, error.fields);
+    else showFormError(form, error.message, []);
+    if (form.elements.password) form.elements.password.value = '';
+  }
+}
+
+const forms = {
+  'login-form': (form) => authForm(form, 'login', (d) => ({
+    login: !d.login.trim() && 'Bitte gib deinen Namen oder deine E-Mail-Adresse ein.',
+    password: !d.password && 'Bitte gib dein Passwort ein.',
+  }), 'Anmelden …'),
+
+  'setup-form': (form) => authForm(form, 'setup_account', (d) => ({
+    code: !d.code.trim() && 'Bitte gib den Einrichtungscode ein.',
+    ...accountChecks(d),
+  }), 'Wird angelegt …'),
+
+  'register-form': (form) => authForm(form, 'register', (d) => ({
+    invite: normalizeCode(d.invite).length !== 12 && 'Der Einladungscode hat 12 Zeichen, z. B. ABCD-EFGH-JKLM.',
+    ...accountChecks(d),
+  }), 'Registriert …'),
+
+  'code-form': async (form) => {
     clearErrors(form);
-    const data = Object.fromEntries(new FormData(form));
-    const errors = {};
-    if (!data.name.trim()) errors.name = 'Bitte gib deinen Namen ein.';
-    if (!data.email.trim()) errors.email = 'Bitte gib deine E-Mail-Adresse ein.';
-    if (data.password.length < 8) errors.password = 'Das Passwort muss mindestens 8 Zeichen lang sein.';
-    if (Object.keys(errors).length) return showFieldErrors(form, errors);
+    const code = form.elements.code.value.replace(/\D/g, '');
+    if (code.length !== 6) return showFieldErrors(form, { code: 'Der Code hat 6 Ziffern.' });
     const button = form.querySelector('[type="submit"]');
-    setBusy(button, true, 'Registriert …');
+    setBusy(button, true, 'Prüft …');
     try {
-      await api('register', { body: data });
-      S.notice = { email: data.email.trim(), kind: 'registered' };
-      render();
+      afterAuth(await api('verify_code', { body: { pending: S.challenge.pending, code } }));
+      toast(`Willkommen, ${S.user.name}!`);
     } catch (error) {
       setBusy(button, false);
+      if (error.code === 'code_expired') { S.challenge = null; toast(error.message, 'error'); go('#/login'); return; }
       if (error.fields) showFieldErrors(form, error.fields);
       else showFormError(form, error.message, []);
+      form.elements.code.select();
     }
   },
 
   'forgot-form': async (form) => {
     clearErrors(form);
-    const email = form.elements.email.value.trim();
-    if (!email) return showFieldErrors(form, { email: 'Bitte gib deine E-Mail-Adresse ein.' });
+    const login = form.elements.login.value.trim();
+    if (!login) return showFieldErrors(form, { login: 'Bitte gib deinen Namen oder deine E-Mail-Adresse ein.' });
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true, 'Sendet …');
     try {
-      await api('request_password_reset', { body: { email } });
-      S.notice = { email, kind: 'reset' };
+      await api('request_password_reset', { body: { login } });
+      S.resetSent = login;
       render();
     } catch (error) {
       setBusy(button, false);
@@ -1509,18 +1819,31 @@ const forms = {
   'reset-form': async (form) => {
     clearErrors(form);
     const password = form.elements.password.value;
-    if (password.length < 8) return showFieldErrors(form, { password: 'Das Passwort muss mindestens 8 Zeichen lang sein.' });
+    if (password.length < 10) return showFieldErrors(form, { password: 'Das Passwort muss mindestens 10 Zeichen lang sein.' });
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true);
     try {
-      S.user = (await api('reset_password', { body: { token: S.route.token, password } })).user;
-      S.notice = null;
+      afterAuth(await api('reset_password', { body: { token: S.route.token, password } }));
+      S.resetSent = null;
       toast('Neues Passwort gespeichert – du bist angemeldet.');
-      go(takeAfterLogin());
     } catch (error) {
       setBusy(button, false);
       if (error.fields) showFieldErrors(form, error.fields);
       else showFormError(form, error.code === 'invalid_token' ? html`${error.message} <a href="#/passwort-vergessen">Neuen Link anfordern</a>` : error.message, []);
+    }
+  },
+
+  'invite-form': async (form) => {
+    const button = form.querySelector('[type="submit"]');
+    setBusy(button, true, 'Erstellt …');
+    try {
+      const result = await api('invite_create', { body: { note: form.elements.note.value.trim(), group: form.elements.group.checked } });
+      S.invites = result.invites;
+      render();
+      await actions['invite-share']({ dataset: { link: result.invite.link } });
+    } catch (error) {
+      setBusy(button, false);
+      toast(error.message, 'error');
     }
   },
 
@@ -1566,7 +1889,7 @@ const forms = {
     const data = Object.fromEntries(new FormData(form));
     const errors = {};
     if (!data.current_password) errors.current_password = 'Bitte gib dein aktuelles Passwort ein.';
-    if (data.new_password.length < 8) errors.new_password = 'Das neue Passwort muss mindestens 8 Zeichen lang sein.';
+    if (data.new_password.length < 10) errors.new_password = 'Das neue Passwort muss mindestens 10 Zeichen lang sein.';
     if (Object.keys(errors).length) return showFieldErrors(form, errors, { current_password: 'err-cur-pw' });
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true);
@@ -1642,8 +1965,12 @@ const forms = {
     const button = form.querySelector('[type="submit"]');
     setBusy(button, true, 'Erstellt …');
     try {
-      const result = await api('create_event', { body: { ...data, participants: S.createPeople } });
+      const friends = [...form.querySelectorAll('input[name="friends"]:checked')].map((i) => i.value);
+      delete data.friends;
+      const result = await api('create_event', { body: { ...data, participants: S.createPeople, friends } });
       S.createPeople = [];
+      S.createFriends.clear();
+      S.user.events.unshift({ code: result.code, name: data.name.trim(), date: data.date || null });
       toast('Event erstellt – lade jetzt deine Gruppe ein.');
       go(`#/e/${result.code}/ausgaben`);
     } catch (error) {
@@ -1858,6 +2185,7 @@ document.addEventListener('keydown', (event) => {
 
 document.addEventListener('input', (event) => {
   const input = event.target;
+  if (input.id === 'f-search') onSearchInput(input.value);
   if (input.getAttribute('aria-invalid')) {
     input.removeAttribute('aria-invalid');
     const errId = input.getAttribute('aria-describedby')?.split(' ').find((id) => id.startsWith('err-'));
@@ -1868,6 +2196,9 @@ document.addEventListener('input', (event) => {
 
 document.addEventListener('change', (event) => {
   const { id, value } = event.target;
+  if (event.target.name === 'friends' && event.target.closest('#create-form')) {
+    if (event.target.checked) S.createFriends.add(value); else S.createFriends.delete(value);
+  }
   if (id === 'f-paypal-qr') { scanPaypalQr(event.target); return; }
   if (id === 'filter-person') { S.filters.person = value; render(); document.getElementById(id)?.focus(); }
   if (id === 'filter-category') { S.filters.category = value; render(); document.getElementById(id)?.focus(); }

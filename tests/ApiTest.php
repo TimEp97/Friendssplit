@@ -10,6 +10,8 @@ declare(strict_types=1);
 require __DIR__ . '/assert.php';
 require __DIR__ . '/../public/api/lib/Auth.php';
 
+const SETUP_CODE = 'test-einrichtungscode-123';
+
 $tmp = sys_get_temp_dir() . '/friendsplit-test-' . bin2hex(random_bytes(4));
 mkdir($tmp);
 $configFile = "$tmp/config.php";
@@ -18,7 +20,7 @@ if (getenv('FS_TEST_DSN')) {
     $db = ['dsn' => getenv('FS_TEST_DSN'), 'user' => getenv('FS_TEST_USER') ?: null, 'password' => getenv('FS_TEST_PASSWORD') ?: null];
     $pdo = new PDO($db['dsn'], $db['user'], $db['password'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
     $pdo->exec('SET FOREIGN_KEY_CHECKS = 0');
-    foreach (['fs_rate_limits', 'fs_user_tokens', 'fs_sessions', 'fs_users', 'fs_activity', 'fs_settlements', 'fs_expense_shares', 'fs_expenses', 'fs_event_participants', 'fs_persons', 'fs_events'] as $table) {
+    foreach ($pdo->query("SHOW TABLES LIKE 'fs\\_%'")->fetchAll(PDO::FETCH_COLUMN) as $table) {
         $pdo->exec("DROP TABLE IF EXISTS $table");
     }
     $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
@@ -31,6 +33,7 @@ file_put_contents($configFile, '<?php return ' . var_export([
     'mail' => ['transport' => 'log', 'log_file' => $mailLog],
     'auto_migrate' => true,
     'setup_key' => 'test-setup-key-1234567890',
+    'setup_code' => SETUP_CODE,
 ], true) . ';');
 
 $port = random_int(20000, 40000);
@@ -51,26 +54,36 @@ for ($i = 0; $i < 50 && !@fsockopen('127.0.0.1', $port); $i++) {
     usleep(100_000);
 }
 
-/** Sitzungs-Cookies je Testkonto (Bezeichnung => Cookie-Wert) und Zuordnung Personen-ID => Konto */
+/**
+ * Cookies je Testkonto: $sessions = Sitzung, $devices = bekanntes Gerät (Bezeichnung => Cookie-Wert).
+ * $personAccount ordnet Personen-IDs im Event einem Testkonto zu.
+ */
 $sessions = [];
+$devices = [];
 $personAccount = [];
 
 /**
  * Ruft die API auf. $as ist eine Kontobezeichnung (z. B. 'Alex'), eine Personen-ID (dann das
- * verknüpfte Konto) oder null für Aufrufe ohne Anmeldung. Gesetzte Sitzungs-Cookies werden
- * für das Konto gemerkt.
+ * verknüpfte Konto) oder null für Aufrufe ohne Anmeldung. Gesetzte Cookies werden für das Konto gemerkt.
  * @return array{status:int,body:array}
  */
 function call(string $action, ?array $body = null, ?string $code = null, ?string $as = 'Alex', bool $csrf = true): array
 {
-    global $port, $sessions, $personAccount;
+    global $port, $sessions, $devices, $personAccount;
     $account = $as !== null ? ($personAccount[$as] ?? $as) : null;
     $headers = ['Accept: application/json'];
     if ($code !== null) {
         $headers[] = "X-Event-Code: $code";
     }
+    $cookies = [];
     if ($account !== null && isset($sessions[$account])) {
-        $headers[] = 'Cookie: ' . Auth::COOKIE . '=' . $sessions[$account];
+        $cookies[] = Auth::COOKIE . '=' . $sessions[$account];
+    }
+    if ($account !== null && isset($devices[$account])) {
+        $cookies[] = Auth::DEVICE_COOKIE . '=' . $devices[$account];
+    }
+    if ($cookies) {
+        $headers[] = 'Cookie: ' . implode('; ', $cookies);
     }
     if ($body !== null) {
         $headers[] = 'Content-Type: application/json';
@@ -87,12 +100,14 @@ function call(string $action, ?array $body = null, ?string $code = null, ?string
     $raw = file_get_contents("http://127.0.0.1:$port/api/index.php?action=$action", false, $context);
     preg_match('/\d{3}/', $http_response_header[0], $m);
     foreach ($http_response_header as $line) {
-        if ($account !== null && preg_match('/^Set-Cookie: ' . Auth::COOKIE . '=([^;]*)/i', $line, $c)) {
-            if ($c[1] === '' || $c[1] === 'deleted') {
-                unset($sessions[$account]);
-            } else {
-                $sessions[$account] = $c[1];
-            }
+        if ($account === null || !preg_match('/^Set-Cookie: (fs_session|fs_device)=([^;]*)/i', $line, $c)) {
+            continue;
+        }
+        $jar = $c[1] === Auth::COOKIE ? 'sessions' : 'devices';
+        if ($c[2] === '' || $c[2] === 'deleted') {
+            unset($GLOBALS[$jar][$account]);
+        } else {
+            $GLOBALS[$jar][$account] = $c[2];
         }
     }
     $decoded = json_decode((string) $raw, true);
@@ -124,13 +139,45 @@ function tokenFrom(array $mail, string $route): string
     return $m[1];
 }
 
-/** Registriert ein Konto, bestätigt die E-Mail und merkt sich die Sitzung. */
-function account(string $label): void
+/** 6-stelliger Code aus der letzten E-Mail an diese Adresse */
+function codeFrom(string $email): string
 {
-    $email = strtolower($label) . '@example.test';
-    assertSame(200, call('register', ['email' => $email, 'password' => "geheim-$label-123", 'name' => $label], null, null)['status']);
-    $r = call('verify_email', ['token' => tokenFrom(lastMail($email), 'bestaetigen')], null, $label);
-    assertSame(200, $r['status'], "Bestätigung für $label");
+    $mail = lastMail($email);
+    if ($mail === null || !preg_match('/^\s+(\d{6})$/m', $mail['body'], $m)) {
+        throw new RuntimeException("Kein Code in der E-Mail an $email");
+    }
+    return $m[1];
+}
+
+function emailOf(string $label): string
+{
+    return strtolower($label) . '@example.test';
+}
+
+/** Neue Einladung von $from; gibt den Code zurück */
+function invite(string $from = 'Alex', bool $group = false): string
+{
+    $r = call('invite_create', ['note' => 'Test', 'group' => $group], null, $from);
+    assertSame(200, $r['status'], 'Einladung erstellen');
+    return $r['body']['data']['invite']['code'];
+}
+
+/** Registriert ein Konto mit Einladung von Alex, bestätigt den Code aus der E-Mail und merkt sich die Sitzung. */
+function account(string $label, string $from = 'Alex'): void
+{
+    $r = call('register', ['invite' => invite($from), 'name' => $label, 'email' => emailOf($label), 'password' => "geheim-$label-123"], null, $label);
+    assertSame(202, $r['status'], "Registrierung $label");
+    $r = call('verify_code', ['pending' => $r['body']['data']['pending'], 'code' => codeFrom(emailOf($label))], null, $label);
+    assertSame(200, $r['status'], "Bestätigung $label");
+}
+
+/** Freundschaft zwischen zwei Testkonten herstellen */
+function befriend(string $a, string $b): void
+{
+    $id = call('me', null, null, $b)['body']['data']['user']['id'];
+    call('friend_request', ['id' => $id], null, $a);
+    $aid = call('me', null, null, $a)['body']['data']['user']['id'];
+    call('friend_accept', ['id' => $aid], null, $b);
 }
 
 function byName(array $state): array
@@ -146,60 +193,92 @@ function paypalOf(array $state, string $name): ?string
 $code = null;
 $ids = [];
 
-test('Registrierung mit E-Mail-Bestätigung', function () {
+test('Einrichtung: erstes Konto mit Einrichtungscode wird Admin', function () {
     global $sessions;
-    $r = call('register', ['email' => 'kein-mail', 'password' => 'kurz', 'name' => ''], null, null);
+    assertSame(true, call('status', null, null, null)['body']['data']['setup_needed']);
+    $r = call('setup_account', ['code' => 'falsch', 'name' => 'Alex', 'email' => 'alex@example.test', 'password' => 'geheim-Alex-123'], null, 'Alex');
     assertSame(422, $r['status']);
-    assertSame(['email', 'password', 'name'], array_keys($r['body']['error']['fields']));
+    assertTrue(isset($r['body']['error']['fields']['code']));
+    $r = call('setup_account', ['code' => SETUP_CODE, 'name' => 'A', 'email' => 'kein-mail', 'password' => 'kurz'], null, 'Alex');
+    assertSame(['name', 'email', 'password'], array_keys($r['body']['error']['fields']));
 
-    $r = call('register', ['email' => ' Alex@Example.test ', 'password' => 'erstes-passwort', 'name' => 'Alex'], null, null);
+    $r = call('setup_account', ['code' => SETUP_CODE, 'name' => 'Alex', 'email' => 'Alex@Example.test', 'password' => 'geheim-Alex-123'], null, 'Alex');
     assertSame(200, $r['status']);
-    $mail = lastMail('alex@example.test');
-    assertSame('Bitte bestätige deine E-Mail-Adresse', $mail['subject']);
-    assertTrue(str_contains($mail['body'], 'https://example.test/friendsplit/#/bestaetigen/'), 'Link mit app_url');
-    $firstToken = tokenFrom($mail, 'bestaetigen');
-
-    // Anmelden geht erst nach der Bestätigung
-    $r = call('login', ['email' => 'alex@example.test', 'password' => 'erstes-passwort'], null, 'Alex');
-    assertSame(403, $r['status']);
-    assertSame('email_not_verified', $r['body']['error']['code']);
-
-    // Erneute Registrierung des unbestätigten Kontos übernimmt das neue Passwort, alte Links verfallen
-    assertSame(200, call('register', ['email' => 'alex@example.test', 'password' => 'geheim-Alex-123', 'name' => 'Alex'], null, null)['status']);
-    assertSame(400, call('verify_email', ['token' => $firstToken], null, 'Alex')['status'], 'alter Link ungültig');
-    assertSame(400, call('verify_email', ['token' => 'falsch'], null, 'Alex')['status']);
-
-    $token = tokenFrom(lastMail('alex@example.test'), 'bestaetigen');
-    $r = call('verify_email', ['token' => $token], null, 'Alex');
-    assertSame(200, $r['status']);
+    assertSame('admin', $r['body']['data']['user']['role']);
     assertSame('alex@example.test', $r['body']['data']['user']['email']);
-    assertTrue(isset($sessions['Alex']), 'nach Bestätigung angemeldet');
-    assertSame(400, call('verify_email', ['token' => $token], null, 'Gast')['status'], 'Link nur einmal nutzbar');
-
-    // Erneute Registrierung eines bestätigten Kontos verrät nichts, schickt aber einen Hinweis
-    $r = call('register', ['email' => 'alex@example.test', 'password' => 'anderes-passwort', 'name' => 'Fake'], null, null);
-    assertSame(200, $r['status']);
-    assertSame('Dein FriendSplit-Konto', lastMail('alex@example.test')['subject']);
+    assertTrue(isset($sessions['Alex']), 'direkt angemeldet');
+    assertSame(false, call('status', null, null, null)['body']['data']['setup_needed']);
+    $r = call('setup_account', ['code' => SETUP_CODE, 'name' => 'Zweit', 'email' => 'zweit@example.test', 'password' => 'geheim-zweit-123'], null, null);
+    assertSame(409, $r['status'], 'nur einmal');
 });
 
-test('Anmelden, Abmelden und geschützte Aktionen', function () {
+test('Registrieren nur mit Einladung, Code per E-Mail', function () {
     global $sessions;
-    assertSame(401, call('me', null, null, null)['status']);
-    assertSame(401, call('create_event', ['name' => 'X'], null, null)['status']);
-    $r = call('me');
-    assertSame(200, $r['status']);
-    assertSame('Alex', $r['body']['data']['user']['name']);
+    $r = call('register', ['invite' => 'AAAA-BBBB-CCCC', 'name' => 'Sam', 'email' => 'sam@example.test', 'password' => 'geheim-Sam-123'], null, 'Sam');
+    assertSame(422, $r['status']);
+    assertTrue(isset($r['body']['error']['fields']['invite']));
 
-    assertSame(200, call('logout', [], null, 'Alex')['status']);
-    assertTrue(!isset($sessions['Alex']), 'Cookie gelöscht');
-    $r = call('login', ['email' => 'alex@example.test', 'password' => 'falsch-falsch'], null, 'Alex');
+    $invite = invite();
+    $r = call('invites');
+    assertTrue(str_contains($r['body']['data']['invites'][0]['link'], 'https://example.test/friendsplit/#/registrieren/' . $invite));
+    $info = call('invite_info&code=' . strtolower($invite), null, null, null)['body']['data'];
+    assertSame(['valid' => true, 'from' => 'Alex', 'group' => false], $info);
+
+    // Name schon vergeben (Groß-/Kleinschreibung egal)
+    $r = call('register', ['invite' => $invite, 'name' => 'alex', 'email' => 'sam@example.test', 'password' => 'geheim-Sam-123'], null, 'Sam');
+    assertSame(422, $r['status']);
+    assertTrue(isset($r['body']['error']['fields']['name']));
+
+    $r = call('register', ['invite' => $invite, 'name' => 'Sam', 'email' => 'sam@example.test', 'password' => 'geheim-Sam-123'], null, 'Sam');
+    assertSame(202, $r['status']);
+    $pending = $r['body']['data']['pending'];
+    assertSame(['verify', 's***@example.test'], [$r['body']['data']['purpose'], $r['body']['data']['email']]);
+    assertTrue(!isset($sessions['Sam']), 'erst nach dem Code angemeldet');
+    $code = codeFrom('sam@example.test');
+    assertSame(422, call('verify_code', ['pending' => $pending, 'code' => $code === '000000' ? '111111' : '000000'], null, 'Sam')['status']);
+    $r = call('verify_code', ['pending' => $pending, 'code' => $code], null, 'Sam');
+    assertSame(200, $r['status']);
+    assertSame(['Sam', 'user', 1], [$r['body']['data']['user']['name'], $r['body']['data']['user']['role'], $r['body']['data']['user']['friend_requests']]);
+    assertTrue(isset($sessions['Sam']));
+    assertSame(400, call('verify_code', ['pending' => $pending, 'code' => $code], null, 'Sam')['status'], 'Code nur einmal');
+
+    // Einladung ist verbraucht
+    $r = call('register', ['invite' => $invite, 'name' => 'Kai', 'email' => 'kai@example.test', 'password' => 'geheim-Kai-123'], null, null);
+    assertSame(422, $r['status']);
+    assertSame(false, call('invite_info&code=' . $invite, null, null, null)['body']['data']['valid']);
+    assertSame(['Sam'], call('invites')['body']['data']['invites'][0]['members']);
+});
+
+test('Anmelden mit Name oder E-Mail, Code nur auf neuen Geräten', function () {
+    global $sessions, $devices;
+    call('logout', [], null, 'Sam');
+    assertSame(401, call('me', null, null, 'Sam')['status']);
+    // Bekanntes Gerät: direkt angemeldet, mit Name statt E-Mail
+    $r = call('login', ['login' => ' sAm ', 'password' => 'geheim-Sam-123'], null, 'Sam');
+    assertSame(200, $r['status']);
+    assertSame('Sam', $r['body']['data']['user']['name']);
+
+    // Neues Gerät (ohne Geräte-Cookie): Code per E-Mail
+    $r = call('login', ['login' => 'sam@example.test', 'password' => 'geheim-Sam-123'], null, 'SamHandy');
+    assertSame(202, $r['status']);
+    assertSame('login', $r['body']['data']['purpose']);
+    assertSame('FriendSplit-Code: ' . codeFrom('sam@example.test'), lastMail('sam@example.test')['subject']);
+    $pending = $r['body']['data']['pending'];
+    assertSame(429, call('resend_code', ['pending' => $pending], null, 'SamHandy')['status'], 'erst nach einer Minute');
+    $r = call('verify_code', ['pending' => $pending, 'code' => codeFrom('sam@example.test')], null, 'SamHandy');
+    assertSame(200, $r['status']);
+    assertTrue(isset($devices['SamHandy']), 'Gerät gemerkt');
+    call('logout', [], null, 'SamHandy');
+    assertSame(200, call('login', ['login' => 'Sam', 'password' => 'geheim-Sam-123'], null, 'SamHandy')['status'], 'danach ohne Code');
+
+    $r = call('login', ['login' => 'Sam', 'password' => 'falsch-falsch'], null, null);
     assertSame(401, $r['status']);
     assertSame('invalid_credentials', $r['body']['error']['code']);
-    assertSame(401, call('login', ['email' => 'niemand@example.test', 'password' => 'falsch-falsch'], null, 'Alex')['status'], 'gleiche Antwort ohne Konto');
-    assertSame(200, call('login', ['email' => 'ALEX@example.test', 'password' => 'geheim-Alex-123'], null, 'Alex')['status']);
-    assertSame(200, call('me')['status']);
+    assertSame(401, call('login', ['login' => 'niemand', 'password' => 'falsch-falsch'], null, null)['status'], 'gleiche Antwort ohne Konto');
 
-    // POST ohne CSRF-Header wird abgelehnt
+    // Geschützte Aktionen und CSRF-Schutz
+    assertSame(401, call('me', null, null, null)['status']);
+    assertSame(401, call('create_event', ['name' => 'X'], null, null)['status']);
     $r = call('update_profile', ['paypal' => ''], null, 'Alex', false);
     assertSame(403, $r['status']);
     assertSame('csrf', $r['body']['error']['code']);
@@ -209,9 +288,8 @@ test('Passwort vergessen', function () {
     global $sessions;
     account('Mathis');
     $oldSession = $sessions['Mathis'];
-    assertSame(200, call('request_password_reset', ['email' => 'unbekannt@example.test'], null, null)['status']);
-    assertSame(null, lastMail('unbekannt@example.test'), 'keine Mail ohne Konto');
-    assertSame(200, call('request_password_reset', ['email' => 'mathis@example.test'], null, null)['status']);
+    assertSame(200, call('request_password_reset', ['login' => 'unbekannt'], null, null)['status']);
+    assertSame(200, call('request_password_reset', ['login' => 'Mathis'], null, null)['status']);
     $token = tokenFrom(lastMail('mathis@example.test'), 'passwort-neu');
     assertSame(422, call('reset_password', ['token' => $token, 'password' => 'kurz'], null, 'Mathis')['status']);
     assertSame(200, call('reset_password', ['token' => $token, 'password' => 'neues-passwort-1'], null, 'Mathis')['status']);
@@ -219,20 +297,91 @@ test('Passwort vergessen', function () {
     assertTrue($sessions['Mathis'] !== $oldSession, 'neue Sitzung');
     $sessions['Alt'] = $oldSession;
     assertSame(401, call('me', null, null, 'Alt')['status'], 'alte Sitzungen beendet');
-    assertSame(200, call('login', ['email' => 'mathis@example.test', 'password' => 'neues-passwort-1'], null, 'Mathis')['status']);
+    assertSame(200, call('login', ['login' => 'mathis@example.test', 'password' => 'neues-passwort-1'], null, 'Mathis')['status']);
 });
 
 test('Zu viele Fehlversuche werden gebremst', function () {
     account('Bruno');
     for ($i = 0; $i < 10; $i++) {
-        call('login', ['email' => 'bruno@example.test', 'password' => 'falsch-falsch'], null, null);
+        call('login', ['login' => 'Bruno', 'password' => 'falsch-falsch'], null, null);
     }
-    $r = call('login', ['email' => 'bruno@example.test', 'password' => 'geheim-Bruno-123'], null, null);
-    assertSame(429, $r['status']);
+    assertSame(429, call('login', ['login' => 'bruno', 'password' => 'geheim-Bruno-123'], null, 'Bruno')['status']);
+});
+
+test('Freunde: suchen, anfragen, annehmen, entfernen', function () {
+    $sam = call('me', null, null, 'Sam')['body']['data']['user']['id'];
+    $alex = call('me')['body']['data']['user']['id'];
+    $mathis = call('me', null, null, 'Mathis')['body']['data']['user']['id'];
+    // Alex hat Sam eingeladen → offene Anfrage bei Sam
+    $f = call('friends', null, null, 'Sam')['body']['data'];
+    assertSame([['id' => $alex, 'name' => 'Alex']], $f['incoming']);
+    $f = call('friend_accept', ['id' => $alex], null, 'Sam')['body']['data'];
+    assertSame(['Alex'], array_column($f['friends'], 'name'));
+    assertSame(0, call('me', null, null, 'Sam')['body']['data']['user']['friend_requests']);
+
+    // Suche: Teil des Namens, mit Stand der Freundschaft, ohne E-Mail-Adressen
+    $r = call('search&q=sa', null, null, 'Alex')['body']['data']['results'];
+    assertSame([['id' => $sam, 'name' => 'Sam', 'status' => 'friend']], $r);
+    assertSame([], call('search&q=s', null, null, 'Alex')['body']['data']['results'], 'ab 2 Zeichen');
+    assertSame([], call('search&q=example', null, null, 'Alex')['body']['data']['results'], 'keine Suche nach E-Mail');
+
+    // Mathis fragt Sam an; Sam lehnt ab; Gegenanfrage gilt als Annehmen
+    call('friend_request', ['id' => $sam], null, 'Mathis');
+    assertSame('outgoing', call('search&q=sam', null, null, 'Mathis')['body']['data']['results'][0]['status']);
+    $f = call('friend_remove', ['id' => $mathis], null, 'Sam')['body']['data'];
+    assertSame([], $f['incoming']);
+    call('friend_request', ['id' => $sam], null, 'Mathis');
+    $f = call('friend_request', ['id' => $mathis], null, 'Sam')['body']['data'];
+    assertSame(['Alex', 'Mathis'], array_column($f['friends'], 'name'));
+    assertSame(422, call('friend_request', ['id' => $sam], null, 'Sam')['status'], 'nicht mit sich selbst');
+    assertSame(404, call('friend_accept', ['id' => $mathis], null, 'Alex')['status'], 'keine Anfrage');
+    befriend('Alex', 'Mathis');
+});
+
+test('Gruppen-Einladung für mehrere Personen', function () {
+    $code = invite('Sam', true);
+    $info = call('invite_info&code=' . $code, null, null, null)['body']['data'];
+    assertSame(['valid' => true, 'from' => 'Sam', 'group' => true], $info);
+    foreach (['Gina', 'Hugo'] as $name) {
+        $r = call('register', ['invite' => $code, 'name' => $name, 'email' => emailOf($name), 'password' => "geheim-$name-123"], null, $name);
+        assertSame(202, $r['status'], $name);
+        call('verify_code', ['pending' => $r['body']['data']['pending'], 'code' => codeFrom(emailOf($name))], null, $name);
+    }
+    $invite = call('invites', null, null, 'Sam')['body']['data']['invites'][0];
+    assertSame([2, 30, ['Gina', 'Hugo'], true], [$invite['uses'], $invite['max_uses'], $invite['members'], $invite['open']]);
+    assertSame(2, count(call('friends', null, null, 'Sam')['body']['data']['outgoing']));
+    assertSame(200, call('invite_delete', ['code' => $code], null, 'Sam')['status']);
+    assertSame(false, call('invite_info&code=' . $code, null, null, null)['body']['data']['valid']);
+});
+
+test('Admin: Konten sehen, sperren, Passwort-Link, löschen', function () {
+    assertSame(403, call('admin_users', null, null, 'Sam')['status'], 'nur Admin');
+    $users = call('admin_users')['body']['data']['users'];
+    $byName = array_column($users, null, 'name');
+    assertSame(['sam@example.test', 'Alex', 1], [$byName['Sam']['email'], $byName['Sam']['invited_by'], $byName['Sam']['friends'] >= 1 ? 1 : 0]);
+    $hugo = $byName['Hugo']['id'];
+
+    $r = call('admin_block', ['id' => $hugo, 'blocked' => true]);
+    assertSame(true, array_column($r['body']['data']['users'], 'blocked', 'name')['Hugo']);
+    assertSame(401, call('me', null, null, 'Hugo')['status'], 'Sitzung beendet');
+    $r = call('login', ['login' => 'Hugo', 'password' => 'geheim-Hugo-123'], null, 'Hugo');
+    assertSame('blocked', $r['body']['error']['code']);
+    assertSame([], call('search&q=hug', null, null, 'Sam')['body']['data']['results'], 'gesperrte nicht auffindbar');
+    call('admin_block', ['id' => $hugo, 'blocked' => false]);
+
+    $link = call('admin_reset_link', ['id' => $hugo])['body']['data']['link'];
+    assertTrue(str_starts_with($link, 'https://example.test/friendsplit/#/passwort-neu/'));
+    $token = substr($link, strrpos($link, '/') + 1);
+    assertSame(200, call('reset_password', ['token' => $token, 'password' => 'vom-admin-gesetzt'], null, 'Hugo')['status']);
+
+    $alex = $byName['Alex']['id'];
+    assertSame(422, call('admin_block', ['id' => $alex, 'blocked' => true])['status'], 'nicht sich selbst');
+    $r = call('admin_delete', ['id' => $hugo]);
+    assertSame(false, in_array('Hugo', array_column($r['body']['data']['users'], 'name'), true));
+    assertSame(401, call('login', ['login' => 'Hugo', 'password' => 'vom-admin-gesetzt'], null, null)['status']);
 });
 
 test('Event erstellen – Validierung', function () {
-    account('Sam');
     account('Eve');
     $r = call('create_event', ['name' => '']);
     assertSame(422, $r['status']);
@@ -501,8 +650,9 @@ test('Eventdaten bearbeiten und Verlauf', function () use (&$code, &$ids) {
 test('Profil: Name, E-Mail und Passwort ändern', function () use (&$code) {
     global $sessions;
     account('Paula');
-    $r = call('update_profile', ['name' => '  Paula P. '], null, 'Paula');
-    assertSame('Paula P.', $r['body']['data']['user']['name']);
+    $r = call('update_profile', ['name' => '  Paula   P '], null, 'Paula');
+    assertSame('Paula P', $r['body']['data']['user']['name']);
+    assertSame(422, call('update_profile', ['name' => 'sam'], null, 'Paula')['status'], 'Name vergeben');
     assertSame(422, call('update_profile', ['name' => ''], null, 'Paula')['status']);
 
     // E-Mail ändern: Passwort nötig, Bestätigung an neue Adresse, Hinweis an alte
@@ -520,7 +670,7 @@ test('Profil: Name, E-Mail und Passwort ändern', function () use (&$code) {
     assertSame('paula.neu@example.test', $r['body']['data']['user']['email']);
     assertSame(null, $r['body']['data']['user']['pending_email']);
     assertSame(400, call('confirm_email_change', ['token' => $token], null, 'Paula')['status']);
-    assertSame(401, call('login', ['email' => 'paula@example.test', 'password' => 'geheim-Paula-123'], null, null)['status']);
+    assertSame(401, call('login', ['login' => 'paula@example.test', 'password' => 'geheim-Paula-123'], null, null)['status']);
 
     // Adresse eines anderen Kontos: keine Änderung, keine Auskunft
     $r = call('change_email', ['email' => 'sam@example.test', 'current_password' => 'geheim-Paula-123'], null, 'Paula');
@@ -550,7 +700,7 @@ test('Konto löschen: Person bleibt als Platzhalter im Event', function () use (
     $r = call('delete_account', ['current_password' => 'geheim-Lou-123'], null, 'Lou');
     assertSame(200, $r['status']);
     assertSame(401, call('me', null, null, 'Lou')['status']);
-    assertSame(401, call('login', ['email' => 'lou@example.test', 'password' => 'geheim-Lou-123'], null, null)['status']);
+    assertSame(401, call('login', ['login' => 'lou@example.test', 'password' => 'geheim-Lou-123'], null, null)['status']);
     $state = call('event', null, $code)['body']['data'];
     $person = array_values(array_filter($state['participants'], fn ($p) => $p['id'] === $lou))[0];
     assertSame(['Lou', false], [$person['name'], $person['linked']]);
@@ -560,6 +710,33 @@ test('Konto löschen: Person bleibt als Platzhalter im Event', function () use (
     assertSame(200, call('claim_person', ['person_id' => $lou], $code, 'Lou')['status']);
 });
 
+test('Freunde direkt ins Event holen', function () {
+    $sam = call('me', null, null, 'Sam')['body']['data']['user']['id'];
+    $gina = call('me', null, null, 'Gina')['body']['data']['user']['id'];
+    $eve = call('me', null, null, 'Eve')['body']['data']['user']['id'];
+    // Nur Freund:innen lassen sich direkt hinzufügen
+    assertSame(422, call('create_event', ['name' => 'Grillen', 'friends' => [$eve]])['status']);
+
+    // Platzhalter „Sam“ wird mit Sams Konto verknüpft
+    $r = call('create_event', ['name' => 'Grillen', 'participants' => ['Sam', 'Tom'], 'friends' => [$sam]]);
+    assertSame(201, $r['status']);
+    $code = $r['body']['data']['code'];
+    $state = call('event', null, $code, 'Sam')['body']['data'];
+    $samPerson = array_values(array_filter($state['participants'], fn ($p) => $p['name'] === 'Sam'))[0];
+    assertSame([true, $sam], [$samPerson['linked'], $samPerson['user_id']]);
+    assertSame($samPerson['id'], $state['me'], 'Sam ist sofort Mitglied');
+    assertTrue(in_array('Grillen', array_column(call('me', null, null, 'Sam')['body']['data']['user']['events'], 'name'), true), 'Event in Sams Liste');
+
+    // Sam holt Gina später dazu
+    befriend('Sam', 'Gina');
+    $r = call('add_friends', ['friends' => [$gina]], $code, 'Sam');
+    assertSame(200, $r['status']);
+    assertSame(['Alex', 'Sam', 'Tom', 'Gina'], array_column($r['body']['data']['state']['participants'], 'name'));
+    assertSame(409, call('add_friends', ['friends' => [$gina]], $code, 'Sam')['status'], 'schon dabei');
+    assertSame(422, call('add_friends', ['friends' => [$eve]], $code, 'Sam')['status'], 'keine Freundin von Sam');
+    assertTrue(str_contains($r['body']['data']['state']['activity'][0]['summary'], 'Sam hat Gina hinzugefügt'));
+});
+
 test('Methoden und Aktionen', function () use (&$code) {
     global $port, $sessions;
     $raw = file_get_contents("http://127.0.0.1:$port/api/index.php?action=delete_expense", false, stream_context_create(['http' => [
@@ -567,8 +744,8 @@ test('Methoden und Aktionen', function () use (&$code) {
     ]]));
     assertSame('method_not_allowed', json_decode($raw, true)['error']['code'], 'Änderungen nur per POST');
     assertSame(404, call('gibt_es_nicht', [], $code)['status']);
-    assertSame(403, call('setup&key=falsch', null, null, null)['status']);
-    assertSame(200, call('setup&key=test-setup-key-1234567890', null, null, null)['status']);
+    assertSame(403, call('migrate&key=falsch', null, null, null)['status']);
+    assertSame(200, call('migrate&key=test-setup-key-1234567890', null, null, null)['status']);
 });
 
 finish();

@@ -1,5 +1,6 @@
 <?php
-// Kopiere diese Datei nach config.php und trage die Zugangsdaten deiner Datenbank ein.
+// Vorlage. Beim Upload mit GitHub Actions entsteht config.php automatisch aus den Secrets.
+// Für einen Upload von Hand: nach config.php kopieren und die Zugangsdaten eintragen.
 // config.php wird nicht ins Git-Repository eingecheckt.
 return [
     'db' => [
@@ -26,12 +27,15 @@ return [
         // 'log_file' => __DIR__ . '/../data/mail.log', // nur für 'transport' => 'log'
     ],
 
-    // Langer Zufallswert (mind. 16 Zeichen) für die einmalige Einrichtung über
-    // https://deine-domain.de/friendsplit/api/index.php?action=setup&key=…
-    // Nach der Einrichtung leeren, damit der Aufruf deaktiviert ist.
-    'setup_key' => '',
+    // Code zum Anlegen des ersten Kontos (Admin), mindestens 12 Zeichen.
+    // Leer = das Datenbank-Passwort gilt als Einrichtungscode.
+    'setup_code' => '',
 
-    // true: Tabellen bei jedem Aufruf mit CREATE TABLE IF NOT EXISTS sicherstellen
-    // (praktisch für SQLite in der Entwicklung, für den Live-Betrieb nicht nötig).
-    'auto_migrate' => false,
+    // true: Die App legt fehlende Tabellen selbst an und rüstet sie nach Updates nach
+    // (prüft dafür nur eine Schema-Version – kostet praktisch nichts). Empfohlen.
+    'auto_migrate' => true,
+
+    // Nur falls auto_migrate aus ist: langer Zufallswert (mind. 16 Zeichen), dann einmal
+    // https://deine-domain.de/api/index.php?action=migrate&key=… aufrufen und danach wieder leeren.
+    'setup_key' => '',
 ];
