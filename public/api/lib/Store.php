@@ -236,6 +236,39 @@ final class Store
         });
     }
 
+    /**
+     * Abrechnung abschließen: Ausgaben lassen sich danach nicht mehr ändern (bis jemand wieder öffnet).
+     * Ausgleichszahlungen können weiter als bezahlt markiert werden.
+     */
+    public function closeEvent(array $event, string $actor): void
+    {
+        $this->transaction($event, function () use ($event, $actor) {
+            $stmt = $this->db->prepare('UPDATE fs_events SET closed_at = ?, closed_by_person_id = ? WHERE id = ? AND closed_at IS NULL');
+            $stmt->execute([Db::now(), $actor, $event['id']]);
+            if ($stmt->rowCount() === 1) {
+                $this->log($event['id'], $actor, 'event_closed', sprintf('%s hat die Abrechnung abgeschlossen', $this->actorName($event, $actor)));
+            }
+        });
+    }
+
+    public function reopenEvent(array $event, string $actor): void
+    {
+        $this->transaction($event, function () use ($event, $actor) {
+            $stmt = $this->db->prepare('UPDATE fs_events SET closed_at = NULL, closed_by_person_id = NULL WHERE id = ? AND closed_at IS NOT NULL');
+            $stmt->execute([$event['id']]);
+            if ($stmt->rowCount() === 1) {
+                $this->log($event['id'], $actor, 'event_reopened', sprintf('%s hat die Abrechnung wieder geöffnet', $this->actorName($event, $actor)));
+            }
+        });
+    }
+
+    private function assertOpen(array $event): void
+    {
+        if (($event['closed_at'] ?? null) !== null) {
+            throw new ApiError(409, 'event_closed', 'Die Abrechnung ist abgeschlossen. Öffne sie unter „Abrechnung“ wieder, um Ausgaben zu ändern.');
+        }
+    }
+
     /** @param array<string,mixed> $in */
     public function updateEvent(array $event, array $in, ?string $actor): void
     {
@@ -394,6 +427,7 @@ final class Store
      */
     public function saveExpense(array $event, array $in, ?string $actor): string
     {
+        $this->assertOpen($event);
         $errors = [];
         $id = is_string($in['id'] ?? null) && $in['id'] !== '' ? $in['id'] : null;
         $version = $in['version'] ?? null;
@@ -501,6 +535,7 @@ final class Store
     /** @param array<string,mixed> $in */
     public function deleteExpense(array $event, array $in, ?string $actor): void
     {
+        $this->assertOpen($event);
         $id = is_string($in['id'] ?? null) ? $in['id'] : '';
         $version = $in['version'] ?? null;
         if (!is_int($version)) {
@@ -636,6 +671,8 @@ final class Store
                 'created_by' => $event['created_by_person_id'],
                 'created_at' => $this->isoUtc($event['created_at']),
                 'updated_at' => $this->isoUtc($event['updated_at']),
+                'closed_at' => ($event['closed_at'] ?? null) !== null ? $this->isoUtc($event['closed_at']) : null,
+                'closed_by' => $event['closed_by_person_id'] ?? null,
             ],
             'me' => $actor,
             'participants' => array_map(fn ($p) => [

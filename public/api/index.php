@@ -214,6 +214,8 @@ try {
         'add_settlement'     => fn ($in) => $store->addSettlement($event, $in, $actor),
         'delete_settlement'  => fn ($in) => $store->deleteSettlement($event, $in, $actor),
         'release_person'     => fn () => $store->releasePerson($event, $actor),
+        'close_event'        => fn () => $store->closeEvent($event, $actor),
+        'reopen_event'       => fn () => $store->reopenEvent($event, $actor),
     ];
     if (!isset($mutations[$action])) {
         throw new ApiError(404, 'unknown_action', 'Unbekannte Aktion.');

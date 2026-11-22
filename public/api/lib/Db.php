@@ -31,7 +31,7 @@ final class Db
     }
 
     /** Stand des Datenbankschemas. Erhöhen, wenn sich schema/*.sql ändert. */
-    public const SCHEMA_VERSION = 2;
+    public const SCHEMA_VERSION = 3;
 
     /**
      * Legt fehlende Tabellen an und rüstet Spalten nach. Prüft zuerst die gespeicherte
@@ -56,6 +56,15 @@ final class Db
             $pdo->exec($statement);
         }
         // Spalte aus dem PayPal-Update für Installationen der ersten Version nachrüsten.
+        // Abrechnung abschließen (Schema 3)
+        $datetime = self::driver($pdo) === 'sqlite' ? 'TEXT' : 'DATETIME';
+        $idType = self::driver($pdo) === 'sqlite' ? 'TEXT' : 'CHAR(16)';
+        if (!self::hasColumn($pdo, 'fs_events', 'closed_at')) {
+            $pdo->exec("ALTER TABLE fs_events ADD COLUMN closed_at $datetime NULL");
+        }
+        if (!self::hasColumn($pdo, 'fs_events', 'closed_by_person_id')) {
+            $pdo->exec("ALTER TABLE fs_events ADD COLUMN closed_by_person_id $idType NULL");
+        }
         if (!self::hasColumn($pdo, 'fs_persons', 'paypal_me')) {
             $pdo->exec('ALTER TABLE fs_persons ADD COLUMN paypal_me ' . (self::driver($pdo) === 'sqlite' ? 'TEXT' : 'VARCHAR(40)') . ' NULL');
         }

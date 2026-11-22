@@ -47,6 +47,7 @@ const ICONS = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1-4.5 4.4-7 8-7s7 2.5 8 7"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+  whatsapp: '<path d="M3.5 20.5l1.3-4.2A8.5 8.5 0 1 1 8 19.3l-4.5 1.2Z"/><path d="M9 8.5c0 3 2.5 6 6 6.5l1.3-1.4-2-1-1 .9c-1.2-.5-2.2-1.5-2.7-2.7l.9-1-1-2L9 8.5Z"/>',
 };
 const icon = (name, cls = 'icon') => raw(`<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`);
 
@@ -521,12 +522,14 @@ function eventHeader(subtitle) {
       <div class="event-head__actions">
         <a class="chip chip--me" href="#/profil" aria-label="Du bist ${me?.name ?? 'niemand'}. Zu deinem Profil">
           ${icon('user')}<span>Du: <strong>${me?.name ?? '–'}</strong></span></a>
-        <a class="btn btn--primary hide-mobile" href="${eventPath('ausgabe/neu')}">${icon('plus')} Ausgabe hinzufügen</a>
+        ${isClosed() ? '' : html`<a class="btn btn--primary hide-mobile" href="${eventPath('ausgabe/neu')}">${icon('plus')} Ausgabe hinzufügen</a>`}
       </div>
     </header>`;
 }
 
-const fab = () => html`<a class="fab" href="${eventPath('ausgabe/neu')}">${icon('plus')}<span>Ausgabe hinzufügen</span></a>`;
+/** Abrechnung abgeschlossen? Dann lassen sich keine Ausgaben mehr ändern. */
+const isClosed = () => Boolean(S.data?.event.closed_at);
+const fab = () => (isClosed() ? '' : html`<a class="fab" href="${eventPath('ausgabe/neu')}">${icon('plus')}<span>Ausgabe hinzufügen</span></a>`);
 
 // ---------- Start / Events
 
@@ -1116,10 +1119,10 @@ function expenseCard(e) {
           <p class="muted small">${shareExplanation(e)}</p>
           ${e.notes ? html`<p class="notes">${e.notes}</p>` : ''}
           <p class="muted small">Eingetragen von ${e.created_by ? personName(e.created_by) : 'unbekannt'}${changed ? ` · zuletzt geändert von ${personName(e.updated_by)} ${relativeTime(e.updated_at)}` : ''}</p>
-          <div class="row">
+          ${isClosed() ? '' : html`<div class="row">
             <a class="btn btn--small" href="${eventPath(`ausgabe/${e.id}`)}">${icon('edit')} Bearbeiten</a>
             <button class="btn btn--small btn--danger-ghost" data-action="delete-expense" data-id="${e.id}">${icon('trash')} Löschen</button>
-          </div>
+          </div>`}
         </div>
       </details>
     </li>`;
@@ -1192,6 +1195,10 @@ function viewExpenseForm() {
   if (editing && !expense) {
     return html`<section class="empty"><div class="empty__icon" aria-hidden="true">🗑️</div><h1 tabindex="-1">Ausgabe nicht gefunden</h1>
       <p>Diese Ausgabe wurde möglicherweise inzwischen gelöscht.</p><a class="btn btn--primary" href="${eventPath()}">Zur Übersicht</a></section>`;
+  }
+  if (isClosed()) {
+    return html`<section class="empty"><div class="empty__icon" aria-hidden="true">🔒</div><h1 tabindex="-1">Abrechnung ist abgeschlossen</h1>
+      <p>Ausgaben lassen sich nicht mehr ändern. Unter „Abrechnung“ kannst du sie wieder öffnen.</p><a class="btn btn--primary" href="${eventPath('abrechnung')}">Zur Abrechnung</a></section>`;
   }
   if (participants.length === 0) {
     return html`<section class="empty"><div class="empty__icon" aria-hidden="true">👥</div><h1 tabindex="-1">Noch keine Teilnehmenden</h1>
@@ -1332,6 +1339,7 @@ function viewSettle() {
       <div class="kpi"><span class="kpi__label">Gesamtausgaben</span><span class="kpi__value">${euro(summary.total_cents)}</span><span class="kpi__sub">${plural(expenses.length, 'Ausgabe', 'Ausgaben')}</span></div>
       <div class="kpi ${summary.open_cents ? 'kpi--neg' : 'kpi--pos'}"><span class="kpi__label">Offener Ausgleich</span><span class="kpi__value">${euro(summary.open_cents)}</span><span class="kpi__sub">${summary.open_cents ? `▼ ${plural(summary.plan.length, 'Zahlung', 'Zahlungen')} offen` : '✓ alles ausgeglichen'}</span></div>
     </div>
+    ${closingCard()}
 
     <section aria-labelledby="plan-heading" class="section">
       <h2 id="plan-heading">So gleicht ihr aus</h2>
@@ -1400,6 +1408,63 @@ function viewSettle() {
       </ul>
     </details>
     ${participants.length ? fab() : ''}`;
+}
+
+/** Abschluss: Abrechnung abschließen, danach PDF teilen und per WhatsApp senden. */
+function closingCard() {
+  const { event, expenses } = S.data;
+  if (!expenses.length) return '';
+  if (!event.closed_at) {
+    return html`
+    <section class="card closing" aria-labelledby="closing-heading">
+      <h2 id="closing-heading">Abrechnung abschließen</h2>
+      <p class="muted small">Sind alle Ausgaben eingetragen? Dann schließt die Abrechnung ab. Danach lassen sich keine Ausgaben mehr ändern, Zahlungen könnt ihr weiter als bezahlt markieren. Ihr bekommt ein PDF mit allen Infos und den PayPal-QR-Codes und könnt es per WhatsApp schicken.</p>
+      <button class="btn btn--primary btn--large" data-action="close-event">✓ Abrechnung abschließen</button>
+    </section>`;
+  }
+  return html`
+    <section class="card closing closing--done" aria-labelledby="closing-heading">
+      <h2 id="closing-heading">✓ Abgerechnet</h2>
+      <p class="muted small">Abgeschlossen am ${formatDateTime(event.closed_at)}${event.closed_by ? ` von ${personName(event.closed_by)}` : ''}. Ausgaben sind gesperrt.</p>
+      <div class="row">
+        <button class="btn btn--primary" data-action="pdf-share">${icon('share')} PDF teilen</button>
+        <button class="btn btn--whatsapp" data-action="whatsapp">${icon('whatsapp')} Per WhatsApp senden</button>
+        <button class="btn" data-action="pdf-download">PDF speichern</button>
+      </div>
+      <button class="linkish small" data-action="reopen-event">Wieder öffnen, um Ausgaben zu ändern</button>
+    </section>`;
+}
+
+/** Text für WhatsApp: Ergebnis, Zahlungen mit PayPal-Links und der Event-Link. */
+function whatsappText() {
+  const { event, summary, participants } = S.data;
+  const lines = [`💸 *Abrechnung „${event.name}“*`, `Gesamt: ${euro(summary.total_cents)} · ${plural(participants.length, 'Person', 'Personen')}`, ''];
+  if (!summary.plan.length) {
+    lines.push('✅ Alles ausgeglichen – niemand schuldet jemandem etwas.');
+  } else {
+    lines.push('*So gleichen wir aus:*');
+    for (const pay of summary.plan) {
+      lines.push(`• ${personName(pay.from)} → ${personName(pay.to)}: *${euro(pay.amount_cents)}*`);
+      const paypal = person(pay.to)?.paypal;
+      if (paypal) lines.push(`  PayPal: ${paypalLink(paypal, pay.amount_cents)}`);
+    }
+  }
+  lines.push('', `Alle Details: ${eventLink(event.code)}`);
+  return lines.join('\n');
+}
+
+async function makePdf() {
+  const { settlementPdf } = await import('./pdf.js');
+  return settlementPdf(S.data, { link: eventLink(S.data.event.code) });
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement('a'), { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
 // ---------- Teilnehmende
@@ -1609,7 +1674,7 @@ async function mutate(action, body, { success, button } = {}) {
   } catch (error) {
     setBusy(button, false);
     toast(error.message, 'error');
-    if (['conflict', 'expense_not_found', 'person_not_found', 'settlement_not_found', 'not_member', 'person_taken', 'already_member'].includes(error.code)) {
+    if (['conflict', 'expense_not_found', 'person_not_found', 'settlement_not_found', 'not_member', 'person_taken', 'already_member', 'event_closed'].includes(error.code)) {
       await loadEvent({ silent: true });
       render();
     }
@@ -1690,6 +1755,47 @@ const actions = {
       try { await navigator.share({ title: 'FriendSplit', text: `${S.user.name} lädt dich zu FriendSplit ein – damit teilen wir unsere Ausgaben:`, url }); return; } catch (e) { if (e.name === 'AbortError') return; }
     }
     copyText(url, 'Einladungslink kopiert');
+  },
+  'close-event': async (el) => {
+    const ok = await confirmDialog({ title: 'Abrechnung abschließen?', text: 'Danach lassen sich keine Ausgaben mehr hinzufügen, ändern oder löschen – bis jemand die Abrechnung wieder öffnet. Zahlungen könnt ihr weiterhin als bezahlt markieren.', confirm: 'Abschließen' });
+    if (!ok) return;
+    if (await mutate('close_event', {}, { success: 'Abrechnung abgeschlossen – jetzt PDF teilen oder per WhatsApp senden', button: el })) {
+      document.getElementById('closing-heading')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  },
+  'reopen-event': async (el) => {
+    const ok = await confirmDialog({ title: 'Abrechnung wieder öffnen?', text: 'Dann lassen sich Ausgaben wieder ändern. Ein schon verschicktes PDF ist danach eventuell nicht mehr aktuell.', confirm: 'Wieder öffnen' });
+    if (ok) await mutate('reopen_event', {}, { success: 'Abrechnung ist wieder offen', button: el });
+  },
+  'pdf-share': async (el) => {
+    setBusy(el, true, 'PDF wird erstellt …');
+    try {
+      const { blob, filename } = await makePdf();
+      const file = new File([blob], filename, { type: 'application/pdf' });
+      if (navigator.canShare?.({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: filename, text: `Abrechnung „${S.data.event.name}“` }); } catch (e) { if (e.name !== 'AbortError') throw e; }
+      } else {
+        downloadBlob(blob, filename);
+        toast('PDF gespeichert – Teilen ist in diesem Browser nicht möglich.');
+      }
+    } catch (error) {
+      toast(`PDF konnte nicht erstellt werden: ${error.message}`, 'error');
+    }
+    setBusy(el, false);
+  },
+  'pdf-download': async (el) => {
+    setBusy(el, true, 'PDF wird erstellt …');
+    try {
+      const { blob, filename } = await makePdf();
+      downloadBlob(blob, filename);
+      toast('PDF gespeichert');
+    } catch (error) {
+      toast(`PDF konnte nicht erstellt werden: ${error.message}`, 'error');
+    }
+    setBusy(el, false);
+  },
+  whatsapp: () => {
+    window.open(`https://wa.me/?text=${encodeURIComponent(whatsappText())}`, '_blank', 'noopener');
   },
   'invite-copy': (el) => copyText(el.dataset.link, 'Einladungslink kopiert'),
   'invite-renew': async () => {

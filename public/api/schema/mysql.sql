@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS fs_events (
   location             VARCHAR(120) NULL,
   notes                TEXT         NULL,
   created_by_person_id CHAR(16)     NULL,
+  closed_at            DATETIME     NULL,
+  closed_by_person_id  CHAR(16)     NULL,
   created_at           DATETIME     NOT NULL,
   updated_at           DATETIME     NOT NULL,
   PRIMARY KEY (id),
