@@ -520,3 +520,8 @@ a.chip { text-decoration: none; }
 .admin-user--blocked { opacity: 0.75; }
 #search-results { margin-top: 0.5rem; }
 #search-results .person-row { padding: 0.35rem 0; }
+.permalink { background: var(--accent-soft); border-radius: var(--radius-sm); padding: 0.9rem 1rem; margin: 0.75rem 0; }
+.permalink__title { margin: 0 0 0.5rem; font-size: 0.9rem; }
+.permalink__url { display: block; word-break: break-all; font-size: 0.85rem; padding: 0.5rem 0.6rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 0.6rem; user-select: all; }
+.permalink .row { margin-bottom: 0.4rem; }
+.permalink p:last-child { margin: 0; }

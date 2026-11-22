@@ -126,6 +126,7 @@ try {
         'change_password' => fn ($in) => ['user' => $auth->profile($auth->changePassword($user, $in))],
         'delete_account'  => function ($in) use ($auth, $user) { $auth->deleteAccount($user, $in); return ['deleted' => true]; },
         'invite_create'   => fn ($in) => ['invite' => $social->createInvite($user, $in), 'invites' => $social->invites($user)],
+        'invite_permanent' => fn ($in) => ['invite' => $social->permanentInvite($user, ($in['renew'] ?? false) === true)],
         'invite_delete'   => function ($in) use ($social, $user) {
             $social->deleteInvite($user, is_string($in['code'] ?? null) ? $in['code'] : '');
             return ['invites' => $social->invites($user)];

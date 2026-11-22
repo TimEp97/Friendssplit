@@ -354,6 +354,33 @@ test('Gruppen-Einladung für mehrere Personen', function () {
     assertSame(false, call('invite_info&code=' . $code, null, null, null)['body']['data']['valid']);
 });
 
+test('Dauer-Einladungslink: ohne Ablauf, beliebig oft, neu erzeugbar', function () {
+    $first = call('invite_permanent', [], null, 'Gina')['body']['data']['invite'];
+    assertSame([true, null, true], [$first['permanent'], $first['expires_at'], $first['open']]);
+    assertSame($first['code'], call('invite_permanent', [], null, 'Gina')['body']['data']['invite']['code'], 'bleibt gleich');
+    assertSame(['valid' => true, 'from' => 'Gina', 'group' => false], call('invite_info&code=' . $first['code'], null, null, null)['body']['data']);
+    foreach (['Ida', 'Jan', 'Kim'] as $name) {
+        $r = call('register', ['invite' => $first['code'], 'name' => $name, 'email' => emailOf($name), 'password' => "geheim-$name-123"], null, $name);
+        assertSame(202, $r['status'], $name);
+        call('verify_code', ['pending' => $r['body']['data']['pending'], 'code' => codeFrom(emailOf($name))], null, $name);
+    }
+    $invite = call('invite_permanent', [], null, 'Gina')['body']['data']['invite'];
+    assertSame([3, ['Ida', 'Jan', 'Kim'], true], [$invite['uses'], $invite['members'], $invite['open']]);
+    assertSame(3, count(call('friends', null, null, 'Gina')['body']['data']['outgoing']), 'Anfragen an alle drei');
+
+    // Zählt nicht gegen die 10 offenen Einladungen
+    for ($i = 0; $i < 10; $i++) {
+        assertSame(200, call('invite_create', ['note' => "Nr $i"], null, 'Gina')['status']);
+    }
+    assertSame(409, call('invite_create', ['note' => 'zu viel'], null, 'Gina')['status']);
+
+    // Neu erzeugen: alter Link ungültig
+    $renewed = call('invite_permanent', ['renew' => true], null, 'Gina')['body']['data']['invite'];
+    assertTrue($renewed['code'] !== $first['code'], 'neuer Code');
+    assertSame(false, call('invite_info&code=' . $first['code'], null, null, null)['body']['data']['valid']);
+    assertSame(true, call('invite_info&code=' . $renewed['code'], null, null, null)['body']['data']['valid']);
+});
+
 test('Admin: Konten sehen, sperren, Passwort-Link, löschen', function () {
     assertSame(403, call('admin_users', null, null, 'Sam')['status'], 'nur Admin');
     $users = call('admin_users')['body']['data']['users'];
