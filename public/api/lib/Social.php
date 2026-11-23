@@ -51,6 +51,17 @@ final class Social
         $stmt->execute([self::normalizeInviteCode($raw)]);
         $row = $stmt->fetch();
         $valid = $row !== false && (int) $row['uses'] < (int) $row['max_uses'] && $row['expires_at'] > Db::now() && (int) ($row['blocked'] ?? 0) === 0;
+        if ($row === false) {
+            // Event-Link als Einladung: wer das Event erstellt hat und wie es heißt
+            $event = $this->db->prepare(
+                'SELECT e.name, p.display_name FROM fs_events e LEFT JOIN fs_persons p ON p.id = e.created_by_person_id WHERE e.access_code = ?'
+            );
+            $event->execute([self::normalizeInviteCode($raw)]);
+            $ev = $event->fetch();
+            if ($ev !== false) {
+                return ['valid' => true, 'from' => $ev['display_name'], 'group' => true, 'event' => $ev['name']];
+            }
+        }
         $permanent = $valid && $row['expires_at'] >= self::PERMANENT_EXPIRES;
         return ['valid' => $valid, 'from' => $valid ? $row['display_name'] : null, 'group' => $valid && !$permanent && (int) $row['max_uses'] > 1];
     }

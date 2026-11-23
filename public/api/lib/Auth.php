@@ -184,7 +184,15 @@ final class Auth
             $take = $this->db->prepare('UPDATE fs_invites SET uses = uses + 1 WHERE code = ? AND uses < max_uses AND expires_at > ?');
             $take->execute([$code, Db::now()]);
             if ($take->rowCount() !== 1) {
-                throw ApiError::validation(['invite' => 'Diese Einladung ist ungültig, schon benutzt oder abgelaufen. Bitte um einen neuen Link.']);
+                // Der Link zu einem Event gilt ebenfalls als Einladung: Wer ihn hat, gehört zur Gruppe.
+                $event = $this->db->prepare('SELECT 1 FROM fs_events WHERE access_code = ?');
+                $event->execute([$code]);
+                if ($event->fetchColumn() === false) {
+                    throw ApiError::validation(['invite' => 'Diese Einladung ist ungültig, schon benutzt oder abgelaufen. Bitte um einen neuen Link.']);
+                }
+                $id = $this->createUser($name, $email, $password, 'user');
+                $this->db->commit();
+                return $this->startChallenge($this->userById($id), 'verify');
             }
             $inviter = $this->db->prepare('SELECT created_by FROM fs_invites WHERE code = ?');
             $inviter->execute([$code]);

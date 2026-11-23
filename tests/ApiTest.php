@@ -811,6 +811,21 @@ test('Abrechnung abschließen sperrt Ausgaben, Zahlungen bleiben möglich', func
     assertTrue(str_contains($r['body']['data']['state']['activity'][0]['summary'], 'Alex hat die Abrechnung wieder geöffnet'));
 });
 
+test('Event-Link gilt als Einladung', function () use (&$code, &$ids) {
+    $info = call('invite_info&code=' . strtolower(implode('-', str_split($code, 4))), null, null, null)['body']['data'];
+    assertSame([true, true, 'Alex'], [$info['valid'], $info['group'], $info['from']]);
+    assertTrue(str_starts_with($info['event'], 'Stuttgart Night'), 'Eventname');
+    foreach (['Nora', 'Otto'] as $name) {
+        $r = call('register', ['invite' => $code, 'name' => $name, 'email' => emailOf($name), 'password' => "geheim-$name-123"], null, $name);
+        assertSame(202, $r['status'], "Registrierung $name mit Event-Code");
+        assertSame(200, call('verify_code', ['pending' => $r['body']['data']['pending'], 'code' => codeFrom(emailOf($name))], null, $name)['status']);
+    }
+    $r = call('event', null, $code, 'Nora');
+    assertSame([200, null], [$r['status'], $r['body']['data']['me']], 'sieht das Event, wählt dann den Namen');
+    assertSame(200, call('join_event', [], $code, 'Nora')['status']);
+    assertSame(422, call('register', ['invite' => 'ZZZZ-ZZZZ-ZZZZ', 'name' => 'Paul', 'email' => 'paul@example.test', 'password' => 'geheim-Paul-123'], null, null)['status'], 'falscher Code');
+});
+
 test('Methoden und Aktionen', function () use (&$code) {
     global $port, $sessions;
     $raw = file_get_contents("http://127.0.0.1:$port/api/index.php?action=delete_expense", false, stream_context_create(['http' => [

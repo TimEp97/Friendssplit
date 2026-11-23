@@ -118,6 +118,12 @@ Aufgebaut wie in der Reiseapp:
   - Liste aller Konten mit E-Mail, wer eingeladen hat, letzter Anmeldung, Zahl der Events und Freunde
   - Passwort-Link erzeugen: 24 Stunden gültig, zum direkten Weitergeben, wenn Mails nicht ankommen
   - Konten sperren, entsperren und löschen
+- **Event-Link = Einladung:** Der Link zu einem Event gilt auch als Einladung zu FriendSplit. Wer ihn ohne Konto öffnet:
+  1. sieht auf der Anmeldeseite „Du wurdest zu einem Event eingeladen → Konto erstellen“,
+  2. registriert sich mit dem schon eingetragenen Event-Code,
+  3. landet nach dem Code aus der E-Mail direkt im Event und wählt dort seinen Namen.
+
+  So lässt sich der Event-Link einfach in die WhatsApp-Gruppe stellen.
 - **Event beitreten per Link:** Wer den Link öffnet und angemeldet ist, wählt einen noch freien Namen aus der Liste oder tritt mit neuem Namen bei. Personen ohne Konto bleiben als Platzhalter möglich, damit man schon Ausgaben für sie eintragen kann.
 - **Sicherheit:**
   - Passwörter liegen nur als `password_hash()` vor.
