@@ -167,6 +167,9 @@ const cache = {
 };
 /** Ziel nach der Anmeldung merken – auch über den Bestätigungslink in einem neuen Tab hinweg. */
 const rememberAfterLogin = (hash) => (hash && hash.startsWith('#/e/') ? local.set('fs.afterLogin', hash) : local.remove('fs.afterLogin'));
+/** Event-Code aus dem gemerkten Ziel (wer über einen Event-Link kam) – oder null. */
+const pendingEventCode = () => (local.get('fs.afterLogin', null) ?? '').match(/^#\/e\/([A-Z0-9]{12})/)?.[1] ?? null;
+
 function takeAfterLogin() {
   const hash = local.get('fs.afterLogin', null);
   local.remove('fs.afterLogin');
@@ -368,7 +371,11 @@ async function loadFor(route) {
   if (route.name === 'friends') jobs.push(api('invite_permanent', { body: {} }).then((d) => { S.permanentInvite = d.invite; }));
   if (route.name === 'admin') jobs.push(api('admin_users').then((d) => { S.adminUsers = d.users; }));
   if (route.name === 'register' && route.invite && S.inviteInfo?.code !== route.invite) {
-    jobs.push(api('invite_info', { params: { code: route.invite } }).then((d) => { S.inviteInfo = { code: route.invite, ...d }; }));
+    jobs.push(api('invite_info', { params: { code: route.invite } }).then((d) => {
+      S.inviteInfo = { code: route.invite, ...d };
+      // Event-Link als Einladung: nach der Registrierung direkt ins Event
+      if (d.event) rememberAfterLogin(`#/e/${normalizeCode(route.invite)}/ausgaben`);
+    }));
   }
   if (!jobs.length) return;
   try {
@@ -416,7 +423,7 @@ async function onRoute() {
   const previous = S.route;
   S.route = route;
   if (route.name === 'verify' && previous.token !== route.token) verifyEmail(route.token);
-  if (route.name === 'register' && route.invite) rememberAfterLogin(null);
+  if (route.name === 'register' && route.invite && normalizeCode(route.invite) !== pendingEventCode()) rememberAfterLogin(null);
   loadFor(route);
   if (route.name !== 'expense') S.form = null;
   if (route.name !== 'personen') { S.renaming = null; S.editingEvent = false; }
@@ -714,8 +721,16 @@ const nameEmailFields = () => html`
     <p class="hint" id="hint-email">Nur für Codes und „Passwort vergessen“. Deine Freunde sehen sie nicht.</p><p class="field-error" id="err-email"></p></div>`;
 
 function viewLogin() {
+  const eventCode = pendingEventCode();
   return html`
     ${authHead('Anmelden', 'Teilt Ausgaben mit euren Freunden – alle Events an einem Ort, auf jedem Gerät.')}
+    ${eventCode ? html`
+    <div class="card invited" role="status">
+      <h2>Du wurdest zu einem Event eingeladen</h2>
+      <p>Neu bei FriendSplit? Leg kurz ein Konto an – danach bist du direkt im Event und wählst deinen Namen.</p>
+      <a class="btn btn--primary btn--large" href="#/registrieren/${formatCode(eventCode)}">Konto erstellen</a>
+      <p class="muted small">Schon ein Konto? Dann unten anmelden.</p>
+    </div>` : ''}
     <form id="login-form" class="form card" novalidate>
       <div class="form-error" role="alert" hidden></div>
       <div class="field"><label for="f-login">Name oder E-Mail-Adresse</label>
@@ -727,8 +742,8 @@ function viewLogin() {
         <button class="btn btn--primary" type="submit">Anmelden</button>
       </div>
     </form>
-    <p class="center muted small">Neu hier? FriendSplit ist nur mit Einladung. Den Link bekommst du von jemandem, der schon dabei ist.<br>
-      <a href="#/registrieren">Ich habe einen Einladungscode</a></p>`;
+    ${eventCode ? '' : html`<p class="center muted small">Neu hier? FriendSplit ist nur mit Einladung. Einen Einladungs- oder Event-Link bekommst du von jemandem, der schon dabei ist.<br>
+      <a href="#/registrieren">Ich habe einen Einladungscode</a></p>`}`;
 }
 
 function viewSetup() {
@@ -751,11 +766,12 @@ function viewRegister() {
   const info = S.inviteInfo?.code === S.route.invite ? S.inviteInfo : null;
   return html`
     ${authHead('Konto erstellen', 'Mit deinem Konto siehst du alle deine Events auf jedem Gerät und kannst Freunde direkt dazuholen.')}
-    ${info?.valid ? html`<div class="banner banner--pos" role="status"><span><strong>${info.from}</strong> ${info.group ? 'lädt eure Gruppe' : 'lädt dich'} zu FriendSplit ein. Danach könnt ihr euch als Freunde verbinden.</span></div>` : ''}
+    ${info?.valid && info.event ? html`<div class="banner banner--pos" role="status"><span>${info.from ? html`<strong>${info.from}</strong> lädt dich` : 'Du bist'} zum Event <strong>„${info.event}“</strong> ${info.from ? 'ein' : 'eingeladen'}. Leg dein Konto an – danach bist du direkt im Event und wählst deinen Namen.</span></div>`
+      : info?.valid ? html`<div class="banner banner--pos" role="status"><span><strong>${info.from}</strong> ${info.group ? 'lädt eure Gruppe' : 'lädt dich'} zu FriendSplit ein. Danach könnt ihr euch als Freunde verbinden.</span></div>` : ''}
     ${info && !info.valid ? html`<div class="banner banner--warn" role="status"><span>Diese Einladung ist schon benutzt, voll oder abgelaufen. Bitte um einen neuen Link.</span></div>` : ''}
     <form id="register-form" class="form card" novalidate>
       <div class="form-error" role="alert" hidden></div>
-      <div class="field"><label for="f-invite">Einladungscode</label>
+      <div class="field"><label for="f-invite">${info?.event ? 'Event-Code' : 'Einladungscode'}</label>
         <input id="f-invite" name="invite" value="${invite}" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="z. B. ABCD-EFGH-JKLM" aria-describedby="err-invite"><p class="field-error" id="err-invite"></p></div>
       ${nameEmailFields()}
       ${passwordField('f-password', 'Passwort', 'new-password')}
